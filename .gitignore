@@ -5,3 +5,9 @@ __pycache__/
 *.pyc
 .venv/
 cdk.out/
+build/
+node_modules/
+.env.local
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/

@@ -1,0 +1,9 @@
+{
+  "generated_by": "scripts/connect_link_vectors.sh",
+  "secret": "test-connect-link-secret-not-real",
+  "cases": [
+    {"name": "basic", "params": {"app_id":"demo","external_user_id":"u_demo","return_to":"http://localhost:8000/","exp":"1700000600"}, "canonical": "app_id=demo&exp=1700000600&external_user_id=u_demo&return_to=http%3A%2F%2Flocalhost%3A8000%2F", "sig": "5bda4b46f6dfc30ac53ca2223c7116f4b523f416be85386519534fb6a97a38ec"},
+    {"name": "space_plus_and_unicode", "params": {"app_id":"demo","external_user_id":"user name+1 é","return_to":"https://example.test/return path","exp":"1700000600"}, "canonical": "app_id=demo&exp=1700000600&external_user_id=user%20name%2B1%20%C3%A9&return_to=https%3A%2F%2Fexample.test%2Freturn%20path", "sig": "4f93bc19a044862831f129b1679d018eac75573c8fb22fc4467fe374fb7b9aa2"},
+    {"name": "unreserved_untouched", "params": {"app_id":"demo","external_user_id":"A-z.0_9~","return_to":"https://example.test/cb","exp":"1700000600"}, "canonical": "app_id=demo&exp=1700000600&external_user_id=A-z.0_9~&return_to=https%3A%2F%2Fexample.test%2Fcb", "sig": "807273e70322a7d71cf759d5f235b1d3ce723d8c7a3c23eaf28096fbbdf2e4c4"}
+  ]
+}

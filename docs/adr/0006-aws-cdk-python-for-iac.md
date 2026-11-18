@@ -1,7 +1,7 @@
 # 6. AWS CDK (Python) for infrastructure as code
 
 Date: 2026-11-18
-Status: Proposed
+Status: Accepted
 
 ## Context
 The roadmap originally named Terraform as a skill this project should prove. During shaping, Dan questioned that: they are an application developer, not a DevOps specialist, and want IaC that fits a modern, code-first workflow. Requirements: infrastructure reviewed in PRs, deployable from CI with OIDC, least-privilege IAM, testable, and cheap to run.

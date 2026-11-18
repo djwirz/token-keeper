@@ -9,6 +9,7 @@ Shaping. `docs/spec.md` is being written through an interview; no code until the
 - Pull requests only; never push to `main`. Merged PRs are the project's record.
 - Spec first, then one thin end-to-end slice per PR. Start each slice in plan mode.
 - Every decision that would be expensive to reverse gets an ADR in `docs/adr/` (format: ADR 0001). Don't decide silently in code.
+- ADRs are written as `Accepted` in the PR that adds them; merging is the acceptance. Never rewrite a merged ADR's decision: add a new ADR that supersedes it.
 - When the spec and the code disagree, stop and ask; update the spec in the same PR if the decision changes.
 - Built with Claude Code in the open: the case study gets a section on how AI was used and where it was wrong, so note real mistakes in PR descriptions.
 

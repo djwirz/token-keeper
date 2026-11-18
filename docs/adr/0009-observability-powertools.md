@@ -1,7 +1,7 @@
 # 9. Observability with Powertools for AWS Lambda
 
 Date: 2026-11-18
-Status: Proposed
+Status: Accepted
 
 ## Context
 Depth 3 requires observability. The budget is $5 a month, and the time is one to two weeks.
@@ -12,9 +12,13 @@ Depth 3 requires observability. The budget is $5 a month, and the time is one to
 3. **Logs and alarms only.** Leaner, but it loses metrics and tracing.
 
 ## Decision
-Option 1. The alarms are: either DLQ non-empty, elevated refresh-failure rate, and planner missing for 45 minutes. A log scrubber and a test keep token-shaped strings out of logs. `docs/runbook.md` covers each alarm.
+Option 1, kept cheap:
+- **Metrics:** about ten custom metrics with a single `service` dimension. Failure reasons go in logs, not dimensions, because every dimension combination is billed as its own metric. Powertools' cold-start metric is off.
+- **Logs:** log groups keep two weeks.
+- **Alarms:** a DLQ has messages; `RefreshFailed` is one or more in an hour; the planner hasn't been invoked for 45 minutes. Each has a concrete way to force it (spec §8).
+- **Hygiene:** a log scrubber and a test keep token-shaped strings out of logs. `docs/runbook.md` covers each alarm.
 
 ## Consequences
-- AWS-native and within free allowances at demo volume.
-- Traces span SQS hops through propagated correlation ids.
+- AWS-native. Custom metrics are the one real cost: a few are emitted around the clock (the planner's), most only when something happens, so the estimate is a dollar or two a month at worst, inside the budget with the KMS key.
+- X-Ray shows each SQS hop as a linked trace, not one continuous trace. The `correlation_id` in logs is what ties a whole flow together.
 - Moving to OpenTelemetry later is possible (Powertools and ADOT coexist), but not planned.

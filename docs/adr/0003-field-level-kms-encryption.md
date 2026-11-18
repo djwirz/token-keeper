@@ -1,7 +1,7 @@
 # 3. Field-level KMS encryption for tokens
 
 Date: 2026-11-18
-Status: Proposed
+Status: Accepted
 
 ## Context
 Tokens must be encrypted at rest (CLAUDE.md). DynamoDB encrypts tables by default, but anyone or anything with `dynamodb:GetItem` on the table still reads plaintext tokens. GitHub tokens are well under KMS's 4 KB direct-encrypt limit.
@@ -13,7 +13,9 @@ Tokens must be encrypted at rest (CLAUDE.md). DynamoDB encrypts tables by defaul
 4. **A Secrets Manager secret per account.** Per-secret monthly cost grows with users, and it isn't designed for this.
 
 ## Decision
-Option 2. Access and refresh tokens (and the PKCE verifier in OAuth state records) are stored as KMS ciphertext. The encryption context is `{"account_id": …}` (or `{"state": …}` for state records), so ciphertext can't be swapped between rows. Only the `callback` and `worker` roles get `kms:Decrypt`. CDK assertion tests enforce this.
+Option 2. Access and refresh tokens (and the PKCE verifier in OAuth state records) are stored as KMS ciphertext. The encryption context binds ciphertext to its row so it can't be swapped between rows: `{"account_id": …}` for accounts, and `{"state_hash": <SHA-256 of the state value>}` for state records. The state value itself is a bearer secret, and encryption context is written to CloudTrail in plain text, so only its hash goes there.
+
+Grants: `connect` can encrypt; `callback` and `worker` can encrypt and decrypt; no other role has either. CDK assertion tests enforce this.
 
 ## Consequences
 - A table export or a mis-granted read role leaks nothing usable.

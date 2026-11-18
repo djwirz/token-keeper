@@ -30,7 +30,7 @@ It shows AWS serverless (EventBridge Scheduler → SQS → Lambda, DynamoDB), OA
 
 - **Time:** one to two focused weeks. Two is the honest estimate.
 - **Money:** a $5/month AWS budget with alerts at 50% and 100%, created **before** the first deploy. Expected costs are the customer-managed KMS key (about a dollar a month) and a handful of custom CloudWatch metrics (low single dollars at worst, see §8). Everything else should round to nothing at demo volume.
-- **Shape:** eight thin PRs after this one (see §12).
+- **Shape:** seven thin PRs after this one, local-first: the first three never touch AWS (see §12).
 - **If time runs short, cut in this order.** The project exists to prove a few things: the refresh lifecycle survives concurrency, tokens are safe, it's deployed and operable, and the GIF shows it working. Cut what proves none of those first:
   1. `cdk diff` posted to PRs (CI still runs `cdk synth`).
   2. X-Ray tracing (logs with correlation ids and metrics stay).
@@ -221,7 +221,15 @@ Powertools for AWS Lambda (Python): structured JSON logs, EMF metrics and X-Ray 
 ## 10. Infrastructure as code, testing and CI
 
 - **IaC:** AWS CDK in Python, with two stacks, `TokenKeeper` and `DemoReceiver`, plus a tiny `Budget` stack deployed first ([ADR 0006](adr/0006-aws-cdk-python-for-iac.md)).
-- **Layout:** `src/token_keeper/` for the app (Python 3.12), `infra/` for CDK, `receiver/` for the demo receiver, and `tests/`.
+- **Layout:** `src/token_keeper/` for the app (Python 3.12), `infra/` for CDK, `receiver/` for the demo receiver, `local/` for the local runner, and `tests/`.
+- **Data that must survive any deploy:** the DynamoDB table and the KMS key are set to `RETAIN`. A table replacement would lose every token, and a deleted key would make every stored token unreadable. CDK assertion tests check both.
+
+### Local development
+There are two places this runs: a laptop and the one deployed `demo` environment. Handlers are plain Python functions, and most of what the project has to prove is Python logic, so it's built and proven locally first.
+
+- **Local runner:** a small script that maps the HTTP routes to the handlers and drains the queues in-process, against moto in server mode (DynamoDB, SQS, KMS). No LocalStack or SAM local: they cost setup time and still don't prove IAM, so a deploy is needed anyway.
+- **GitHub:** the GitHub App lists a `localhost` callback URL alongside the deployed one, so the real OAuth flow, real refreshes and real rotations all work locally against Dan's account. Revocation webhooks are tested with recorded deliveries, or live through smee.io (GitHub's webhook proxy for app development).
+- **What only a deploy proves:** IAM grants actually working, API Gateway throttling, the Scheduler and SQS → Lambda wiring (retries, DLQ redrive), real KMS encryption context, metrics and alarms, X-Ray, and OIDC deploys. These are configuration, written in CDK alongside each slice, checked by `cdk synth` and assertion tests in CI, and proven once in the first deploy.
 - **Tests:**
   - Unit: state machine transitions, signing and verification against the Standard Webhooks published test vectors, connect-link signing against the repo's own test vectors, GitHub webhook signature checks, the token-scrubbing logger.
   - Integration (local): moto for DynamoDB, SQS and KMS, and recorded GitHub responses (respx or similar) for the token and API endpoints, including `bad_refresh_token`, 401, 403 rate-limit, 5xx and a `github_app_authorization` delivery.
@@ -229,8 +237,8 @@ Powertools for AWS Lambda (Python): structured JSON logs, EMF metrics and X-Ray 
     - Two workers race on one account: exactly one makes a refresh call, the stored pair equals that call's response, and the losing worker makes no token call.
     - Stale read: a worker that read the account before another worker's refresh still uses the current refresh token once it holds the lease.
     - Takeover: a revocation lands mid-sync; the worker's final write fails and the account stays `needs_reauth` with no tokens.
-  - Infra: CDK assertion tests (KMS decrypt only granted to the two roles, DLQs attached, alarms exist, budget exists).
-- **CI (GitHub Actions):** on every PR, `ruff`, `mypy`, `pytest`, `cdk synth`, `cdk diff` (posted to the PR via the read-only OIDC role), and gitleaks. On merge to `main`, `cdk deploy` through the GitHub `demo` environment with required approval.
+  - Infra: CDK assertion tests (KMS decrypt only granted to the two roles, DLQs attached, alarms exist, budget exists, table and key retained).
+- **CI (GitHub Actions):** on every PR, `ruff`, `mypy`, `pytest`, `cdk synth`, `cdk diff` (posted to the PR via the read-only OIDC role, from slice 4 on, once there's a deployed stack to diff against), and gitleaks. On merge to `main`, `cdk deploy` through the GitHub `demo` environment with required approval.
 
 ## 11. Acceptance criteria (v1 "done", depth 3)
 
@@ -245,16 +253,19 @@ Stretch (not required): an admin "force re-verify" and a second provider.
 
 ## 12. Proposed slice plan (one PR each, after this spec)
 
-1. Repo skeleton, CI (lint, type, test, gitleaks), CDK app with the Budget stack and OIDC deploy roles. **Budget deployed.**
-2. The webhook contract library: sign and verify with test vectors, plus the demo receiver (verify, store, status page, passcode-gated connect), deployed.
-3. Connect → callback: GitHub App, signed links, state and PKCE, encrypted token storage, Powertools logger with the token scrubber and its test. `account.connected` delivered through the deliverer queue.
-4. Planner → SQS → worker sync with snapshot, with no refresh yet. A deployed connection stops working after 8 hours in this slice; reconnect by hand until slice 5.
-5. Refresh under lease, the three concurrency tests, and the state machine and failure handling.
-6. Revocation webhook: GitHub App webhook on, `github-webhook` λ, instant flip to `needs_reauth`.
-7. Observability: metrics, dashboard, alarms (each forced once), runbook.
-8. Demo polish: cadence knob, README GIF, case-study notes.
+Slices 1–3 are local only. Each one also adds the CDK code for what it builds, checked by `cdk synth` and assertion tests in CI, so the first deploy ships infrastructure that has already been reviewed.
+
+1. **Local foundation:** repo skeleton, CI (lint, type, test, gitleaks, `cdk synth`), the webhook contract library (sign and verify with test vectors), connect-link signing with test vectors, the demo receiver running locally (verify, store, status page, passcode-gated connect), and the local runner.
+2. **Connect → callback, locally:** GitHub App (localhost callback), signed links, state and PKCE, encrypted token storage on moto, Powertools logger with the token scrubber and its test. `account.connected` delivered to the local receiver through the deliverer queue.
+3. **Sync and refresh, locally:** planner → queue → worker with snapshot, refresh under lease, the state machine and failure handling, and the three concurrency tests. Real refresh-token rotations against Dan's GitHub account.
+4. **First deploy:** the Budget stack first, then the OIDC deploy roles, then `TokenKeeper` and `DemoReceiver` with everything built so far. Fix what real IAM, Scheduler and SQS wiring turn up. Ends with a deployed connect and sync.
+5. **Revocation webhook:** `github-webhook` λ, tested locally with recorded deliveries, then live in `demo` with the instant flip to `needs_reauth`.
+6. **Observability:** metrics, dashboard, alarms (each forced once), runbook.
+7. **Demo polish:** cadence knob, README GIF, case-study notes.
+
+The trade-off: IAM and wiring surprises all land in slice 4 instead of spread across slices. With nothing live and one user, that's accepted. If slice 4 looks too big while slice 2 is in progress, deploy the receiver alone at the end of slice 2.
 
 ## 13. Open questions
 
 1. **Roadmap wording.** The build-plan roadmap says "Terraform". With [ADR 0006](adr/0006-aws-cdk-python-for-iac.md), that becomes "IaC (CDK, Python)". The roadmap needs updating outside this repo.
-2. **Case-study angle.** How much of the Instagram comparison goes in the README versus only in ADR 0002? Not blocking; decide in slice 8.
+2. **Case-study angle.** How much of the Instagram comparison goes in the README versus only in ADR 0002? Not blocking; decide in slice 7.

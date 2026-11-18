@@ -21,6 +21,7 @@ dev = [
     "standardwebhooks>=1.0",
     "aws-cdk-lib>=2.170",
     "constructs>=10.4",
+    "pytest-timeout>=2.3",
 ]
 
 [build-system]
@@ -61,3 +62,5 @@ disallow_untyped_decorators = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src", "."]
+# A hang should fail with a stack trace, not stall CI.
+timeout = 60

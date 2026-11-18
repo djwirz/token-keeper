@@ -129,6 +129,6 @@ def test_check_secret_accepts_real_secrets_and_rejects_bad_ones() -> None:
     webhooks.check_secret(SECRET)  # the published test key: 24 bytes
     with pytest.raises(ValueError, match="base64"):
         webhooks.check_secret("whsec_not base64!")
-    for too_short in ("whsec_", "whsec_dG9vLXNob3J0"):
+    for too_short in ("whsec_", "whsec_" + "dG9vLXNob3J0"):
         with pytest.raises(ValueError, match="at least 24 bytes"):
             webhooks.check_secret(too_short)

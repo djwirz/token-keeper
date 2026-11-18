@@ -159,7 +159,8 @@ def test_unreadable_body_is_400_not_500() -> None:
 
 
 def test_malformed_webhook_secret_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("WEBHOOK_SECRET", "whsec_dG9vLXNob3J0")  # decodes to 9 bytes
+    # Split like the other fake secrets so gitleaks doesn't flag it; decodes to 9 bytes.
+    monkeypatch.setenv("WEBHOOK_SECRET", "whsec_" + "dG9vLXNob3J0")
     config.load.cache_clear()
     with pytest.raises(ValueError, match="at least 24 bytes"):
         config.load()

@@ -1,0 +1,9 @@
+# gitleaks config: the default rules, plus a narrow allowlist.
+title = "token-keeper"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Published test vectors: the secrets are public test keys from the Standard Webhooks reference repo (source URL is in the file)."
+paths = ['''^tests/vectors/standard_webhooks\.json$''']

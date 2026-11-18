@@ -45,6 +45,19 @@ def _key(secret: str) -> bytes:
         raise ValueError("webhook secret is not valid base64") from exc
 
 
+MIN_SECRET_BYTES = 24  # the Standard Webhooks spec recommends keys of 24 to 64 bytes
+
+
+def check_secret(secret: str) -> None:
+    """Raise ``ValueError`` unless ``secret`` is a usable signing secret.
+
+    Call this once when configuration loads, so a malformed secret fails at startup
+    instead of turning every delivery into a server error.
+    """
+    if len(_key(secret)) < MIN_SECRET_BYTES:
+        raise ValueError(f"webhook secret must decode to at least {MIN_SECRET_BYTES} bytes")
+
+
 def sign(secret: str, msg_id: str, timestamp: int, body: bytes) -> str:
     """Return one ``v1,<base64>`` signature for this message."""
     signed = f"{msg_id}.{timestamp}.".encode() + body

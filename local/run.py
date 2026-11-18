@@ -48,8 +48,11 @@ def load_or_create_secrets(path: Path = ENV_FILE) -> dict[str, str]:
         values.update(missing)
         lines = ["# Local dev secrets for token-keeper. Generated; never commit."]
         lines += [f"{k}={v}" for k, v in values.items()]
-        path.write_text("\n".join(lines) + "\n")
-        path.chmod(0o600)
+        # Created owner-only from the start, so the secrets are never briefly readable.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write("\n".join(lines) + "\n")
+        path.chmod(0o600)  # O_CREAT's mode doesn't apply to a file that already existed
     return values
 
 
@@ -86,7 +89,7 @@ def start(receiver_port: int = 8000, env_file: Path = ENV_FILE) -> Running:
         }
     )
 
-    from receiver.store import ATTRIBUTE_DEFINITIONS, KEY_SCHEMA, TTL_ATTRIBUTE
+    from receiver.store import ATTRIBUTE_DEFINITIONS, KEY_SCHEMA
 
     dynamodb = boto3.client("dynamodb")
     dynamodb.create_table(
@@ -94,10 +97,6 @@ def start(receiver_port: int = 8000, env_file: Path = ENV_FILE) -> Running:
         KeySchema=KEY_SCHEMA,  # type: ignore[arg-type]
         AttributeDefinitions=ATTRIBUTE_DEFINITIONS,  # type: ignore[arg-type]
         BillingMode="PAY_PER_REQUEST",
-    )
-    dynamodb.update_time_to_live(
-        TableName=RECEIVER_TABLE,
-        TimeToLiveSpecification={"Enabled": True, "AttributeName": TTL_ATTRIBUTE},
     )
 
     from receiver.handler import handler

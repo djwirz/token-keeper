@@ -123,3 +123,12 @@ def test_unknown_versions_and_junk_are_skipped() -> None:
     assert webhooks.verify(SECRET, _headers(**{"webhook-signature": junk}), BODY, now=NOW)
     with pytest.raises(WebhookVerificationError):
         webhooks.verify(SECRET, _headers(**{"webhook-signature": f"v2,{good[3:]}"}), BODY, now=NOW)
+
+
+def test_check_secret_accepts_real_secrets_and_rejects_bad_ones() -> None:
+    webhooks.check_secret(SECRET)  # the published test key: 24 bytes
+    with pytest.raises(ValueError, match="base64"):
+        webhooks.check_secret("whsec_not base64!")
+    for too_short in ("whsec_", "whsec_dG9vLXNob3J0"):
+        with pytest.raises(ValueError, match="at least 24 bytes"):
+            webhooks.check_secret(too_short)

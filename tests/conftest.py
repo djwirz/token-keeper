@@ -15,7 +15,8 @@ WEBHOOK_SECRET = "whsec_" + "dGVzdC13ZWJob29rLXNlY3JldC1ub3QtcmVhbA=="
 CONNECT_SECRET = "test-connect-link-secret-not-real"
 PASSCODE = "test-passcode"
 PUBLIC_URL = "http://localhost:8000/"
-CONNECT_URL = "http://localhost:8000/connect"
+# A different origin from PUBLIC_URL, as in the runner and in AWS: the CSP must allow it.
+CONNECT_URL = "http://localhost:8001/connect"
 
 
 def create_table(name: str = TABLE) -> None:

@@ -4,17 +4,21 @@ One Lambda behind an API Gateway HTTP API (payload format 2.0):
 - ``GET /``: public, read-only status page
 - ``POST /webhooks/token-keeper``: signed account events from Token Keeper
 - ``POST /connect``: passcode-gated; redirects to a signed Token Keeper connect link
+
+Rejected requests get a 4xx and one structured log line with a reason code (never the
+request data), so they can be found in the logs and counted later (spec §8).
 """
 
 from __future__ import annotations
 
 import base64
+import binascii
 import hmac
 import json
 import logging
 from functools import cache
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 from jinja2 import Environment, PackageLoader, select_autoescape
 
@@ -32,16 +36,40 @@ RESULT_MESSAGES = {
     "denied": "Connection cancelled on GitHub.",
     "already_linked": "That GitHub account is already linked to another user.",
 }
-SECURITY_HEADERS = {
-    "content-security-policy": (
-        "default-src 'none'; img-src https:; style-src 'unsafe-inline'; "
-        "form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
-    ),
+# Responses with no HTML get the strictest policy; the status page gets page_csp().
+BASE_HEADERS = {
+    "content-security-policy": "default-src 'none'; frame-ancestors 'none'",
     "referrer-policy": "no-referrer",
     "x-content-type-options": "nosniff",
 }
 
 Response = dict[str, Any]
+
+
+class BadRequest(Exception):
+    """The request can't be read. ``reason`` is a short code that is safe to log."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _origin(url: str) -> str:
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def page_csp(token_keeper_connect_url: str) -> str:
+    """The status page's CSP.
+
+    ``form-action`` also governs where a form submission may be redirected, and the
+    passcode form is answered with a redirect to Token Keeper, so its origin is allowed.
+    """
+    return (
+        "default-src 'none'; img-src https:; style-src 'unsafe-inline'; "
+        f"form-action 'self' {_origin(token_keeper_connect_url)}; "
+        "frame-ancestors 'none'; base-uri 'none'"
+    )
 
 
 @cache
@@ -62,21 +90,25 @@ def _log(event: str, **fields: Any) -> None:
 
 
 def _html(status: int, body: str) -> Response:
-    return {
-        "statusCode": status,
-        "headers": {"content-type": "text/html; charset=utf-8", **SECURITY_HEADERS},
-        "body": body,
+    headers = {
+        **BASE_HEADERS,
+        "content-type": "text/html; charset=utf-8",
+        "content-security-policy": page_csp(config.load().token_keeper_connect_url),
     }
+    return {"statusCode": status, "headers": headers, "body": body}
 
 
 def _empty(status: int) -> Response:
-    return {"statusCode": status, "headers": dict(SECURITY_HEADERS), "body": ""}
+    return {"statusCode": status, "headers": dict(BASE_HEADERS), "body": ""}
 
 
 def _body(event: dict[str, Any]) -> bytes:
     raw = event.get("body") or ""
     if event.get("isBase64Encoded"):
-        return base64.b64decode(raw)
+        try:
+            return base64.b64decode(raw, validate=True)
+        except binascii.Error:
+            raise BadRequest("bad_body_encoding") from None
     return str(raw).encode()
 
 
@@ -108,7 +140,7 @@ def _receive_webhook(event: dict[str, Any]) -> Response:
         reason = exc.reason if isinstance(exc, EventParseError) else "bad_json"
         _log("webhook.rejected", reason=reason, webhook_id=webhook_id)
         return _empty(400)
-    result = _store().save_event(webhook_id, account_event)
+    result = _store().save_event(account_event)
     _log(
         "webhook.received",
         result=result,
@@ -134,7 +166,7 @@ def _connect(event: dict[str, Any]) -> Response:
         return_to=cfg.public_url,
     )
     _log("connect.redirect", external_user_id=cfg.demo_user)
-    return {"statusCode": 303, "headers": {"location": link, **SECURITY_HEADERS}, "body": ""}
+    return {"statusCode": 303, "headers": {"location": link, **BASE_HEADERS}, "body": ""}
 
 
 ROUTES = {
@@ -146,7 +178,12 @@ ROUTES = {
 
 def handler(event: dict[str, Any], context: object) -> Response:
     method = event["requestContext"]["http"]["method"]
-    route = ROUTES.get((method, event.get("rawPath", "")))
+    path = event.get("rawPath", "")
+    route = ROUTES.get((method, path))
     if route is None:
         return _empty(404)
-    return route(event)
+    try:
+        return route(event)
+    except BadRequest as exc:
+        _log("request.rejected", reason=exc.reason, route=f"{method} {path}")
+        return _empty(400)

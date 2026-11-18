@@ -18,6 +18,8 @@ CASES=(
   'basic|{"app_id":"demo","external_user_id":"u_demo","return_to":"http://localhost:8000/","exp":"1700000600"}|app_id=demo&exp=1700000600&external_user_id=u_demo&return_to=http%3A%2F%2Flocalhost%3A8000%2F'
   'space_plus_and_unicode|{"app_id":"demo","external_user_id":"user name+1 é","return_to":"https://example.test/return path","exp":"1700000600"}|app_id=demo&exp=1700000600&external_user_id=user%20name%2B1%20%C3%A9&return_to=https%3A%2F%2Fexample.test%2Freturn%20path'
   'unreserved_untouched|{"app_id":"demo","external_user_id":"A-z.0_9~","return_to":"https://example.test/cb","exp":"1700000600"}|app_id=demo&exp=1700000600&external_user_id=A-z.0_9~&return_to=https%3A%2F%2Fexample.test%2Fcb'
+  # JavaScript's encodeURIComponent leaves ! * ( ) unencoded; strict RFC 3986 doesn't.
+  'sub_delims_encoded|{"app_id":"demo","external_user_id":"a!b*c(d)@e:f/g","return_to":"https://example.test/cb","exp":"1700000600"}|app_id=demo&exp=1700000600&external_user_id=a%21b%2Ac%28d%29%40e%3Af%2Fg&return_to=https%3A%2F%2Fexample.test%2Fcb'
 )
 
 {

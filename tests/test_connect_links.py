@@ -37,6 +37,16 @@ def test_vector_query_verifies(case: dict[str, Any]) -> None:
     assert request.external_user_id == case["params"]["external_user_id"]
 
 
+def test_verification_uses_decoded_values() -> None:
+    # A main app may encode a space as "+" in the query; it's the same signed value.
+    case = next(c for c in VECTORS["cases"] if c["name"] == "space_plus_and_unicode")
+    query = case["canonical"].replace("%20", "+") + f"&sig={case['sig']}"
+    assert "+" in query
+    allowed = {"demo": [case["params"]["return_to"]]}
+    request = connect_links.verify_query(SECRET, query, allowed_return_to=allowed, now=NOW)
+    assert request.external_user_id == "user name+1 é"
+
+
 def _link(**kwargs: Any) -> str:
     args: dict[str, Any] = {
         "app_id": "demo",

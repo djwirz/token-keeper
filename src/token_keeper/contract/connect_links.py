@@ -7,6 +7,11 @@ Canonical string: every parameter except ``sig``, sorted by name, each written
 left as is, everything else UTF-8 percent-encoded with uppercase hex, so a space is
 ``%20``), joined with ``&``. ``sig`` is the lowercase hex HMAC-SHA256 of that string,
 keyed with the UTF-8 bytes of the connect-link secret.
+
+Signers in other languages must use strict RFC 3986 encoding. JavaScript's
+``encodeURIComponent`` leaves ``! * ' ( )`` unencoded and produces a different string;
+the ``sub_delims_encoded`` test vector catches that. The verifier signs the *decoded*
+values, so how the query itself was encoded (``+`` or ``%20`` for a space) doesn't matter.
 """
 
 from __future__ import annotations

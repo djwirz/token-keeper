@@ -1,7 +1,7 @@
 # 5. Webhook contract: Standard Webhooks, full-state events
 
 Date: 2026-11-18
-Status: Accepted
+Status: Accepted. Receiver deduplication superseded by [ADR 0012](0012-receiver-dedupes-on-version.md).
 
 ## Context
 Token Keeper reports to the main app through exactly one endpoint. That endpoint must be authenticated, replay-resistant, safe to retry, and safe to receive out of order.

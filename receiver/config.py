@@ -13,6 +13,8 @@ from functools import cache
 
 import boto3
 
+from token_keeper.contract import webhooks
+
 
 @dataclass(frozen=True)
 class Config:
@@ -40,9 +42,12 @@ def _secret(name: str) -> str:
 
 @cache
 def load() -> Config:
+    """Read configuration once per process. A malformed webhook secret fails here."""
+    webhook_secret = _secret("WEBHOOK_SECRET")
+    webhooks.check_secret(webhook_secret)
     return Config(
         table_name=os.environ["RECEIVER_TABLE"],
-        webhook_secret=_secret("WEBHOOK_SECRET"),
+        webhook_secret=webhook_secret,
         connect_link_secret=_secret("CONNECT_LINK_SECRET"),
         passcode=_secret("DEMO_PASSCODE"),
         token_keeper_connect_url=os.environ["TOKEN_KEEPER_CONNECT_URL"],

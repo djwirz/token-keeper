@@ -17,8 +17,6 @@ from aws_cdk import aws_logs as logs
 from aws_cdk import aws_ssm as ssm
 from constructs import Construct
 
-from receiver.store import TTL_ATTRIBUTE
-
 SSM_PREFIX = "/token-keeper/demo/receiver"
 SECRET_PARAMS = {
     "WEBHOOK_SECRET_PARAM": f"{SSM_PREFIX}/webhook-secret",
@@ -47,7 +45,6 @@ class DemoReceiverStack(Stack):
             "Table",
             partition_key=dynamodb.Attribute(name="PK", type=dynamodb.AttributeType.STRING),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            time_to_live_attribute=TTL_ATTRIBUTE,
             removal_policy=RemovalPolicy.DESTROY,
         )
 
@@ -97,9 +94,12 @@ class DemoReceiverStack(Stack):
                 **SECRET_PARAMS,
             },
         )
-        table.grant_read_write_data(fn)
+        # Exactly what the handler does: one conditional PutItem per event, and a Scan.
+        table.grant(fn, "dynamodb:PutItem", "dynamodb:Scan")
         for env_name, param_name in SECRET_PARAMS.items():
             # SecureString values are created by hand before the first deploy (slice 4).
+            # Generate the passcode at random (e.g. secrets.token_urlsafe(16)): the
+            # throttle on POST /connect slows guessing but doesn't stop it.
             ssm.StringParameter.from_secure_string_parameter_attributes(
                 self, env_name, parameter_name=param_name
             ).grant_read(fn)
@@ -110,7 +110,11 @@ class DemoReceiverStack(Stack):
             (apigw.HttpMethod.POST, "/webhooks/token-keeper"),
             (apigw.HttpMethod.POST, "/connect"),
         ):
-            api.add_routes(path=path, methods=[method], integration=integration)
+            routes = api.add_routes(path=path, methods=[method], integration=integration)
+            if path == "/connect":
+                # The stage's RouteSettings names this route, so CloudFormation must
+                # create the route first or the stage fails ("Unable to find Route").
+                stage.node.add_dependency(*routes)
 
         CfnOutput(self, "ReceiverUrl", value=f"{api.api_endpoint}/")
         CfnOutput(self, "WebhookUrl", value=f"{api.api_endpoint}/webhooks/token-keeper")

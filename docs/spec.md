@@ -120,7 +120,7 @@ Decision and Instagram comparison: [ADR 0002](adr/0002-github-app-with-expiring-
 - `sig` = lowercase hex HMAC-SHA256 of that string, using the **connect-link secret**. It's a separate secret from the webhook one ([ADR 0007](adr/0007-signed-connect-links-state-pkce.md)). Compared in constant time. Test vectors live in the repo, shared by the signer and the verifier.
 - The link is rejected if it's expired (`exp` more than 10 minutes out, or already past), the signature is bad, `app_id` is unknown, or `return_to` isn't on that app's allow-list. The allow-list matches scheme, host, port and path exactly; `return_to` may not carry a query or fragment.
 - Rejections render a plain error page and log a reason code, never the parameters. Connect pages send `Referrer-Policy: no-referrer`.
-- **Demo receiver:** it signs links for a single demo user, and only after the visitor enters the demo passcode (an SSM parameter). The status page itself needs no passcode.
+- **Demo receiver:** it signs links for a single demo user, and only after the visitor enters the demo passcode (an SSM parameter, generated at random rather than chosen, since route throttling slows guessing but doesn't stop it). The status page itself needs no passcode.
 
 ### 6.2 GitHub → Token Keeper: OAuth callback
 `GET /callback?code=…&state=…`. The `state` record is single-use (deleted on read). An error from GitHub (e.g. `access_denied`) with a valid `state` redirects to `return_to` with `?result=denied`; a missing or unknown `state` renders the error page. Success redirects with `?result=connected`. If the GitHub account is already linked to a different main-app user, the callback stores nothing and redirects with `?result=already_linked`.
@@ -129,7 +129,7 @@ Decision and Instagram comparison: [ADR 0002](adr/0002-github-app-with-expiring-
 This follows the [Standard Webhooks](https://www.standardwebhooks.com/) spec ([ADR 0005](adr/0005-standard-webhooks-full-state-events.md)).
 
 Headers:
-- `webhook-id`: a unique event id (ULID), created when the event is enqueued and kept across retries. The receiver dedupes on it.
+- `webhook-id`: a unique event id (ULID), created when the event is enqueued and kept across retries. The receiver logs it but doesn't dedupe on it: `version` does that (see Ordering, and [ADR 0012](adr/0012-receiver-dedupes-on-version.md)).
 - `webhook-timestamp`: unix seconds of this delivery attempt. The receiver rejects anything more than 5 minutes off.
 - `webhook-signature`: `v1,<base64 HMAC-SHA256(secret, id + "." + timestamp + "." + body)>`, computed per attempt. It may hold several space-separated signatures during secret rotation.
 
@@ -155,7 +155,7 @@ Body: always the **full current state**, read when the event is sent (not when i
 ```
 - **Event types:** `account.connected` (every successful callback, including reconnects) and `account.updated` (every successful sync, and every state change). At connect time the snapshot holds the profile and an empty `recent_events`.
 - **States:** `active` or `needs_reauth`. `state_reason` is `null` when active, and otherwise one of `revoked` (GitHub told us), `refresh_rejected` (`bad_refresh_token`), `refresh_expired`, or `unauthorized` (a 401 that a refresh didn't fix). Transient errors are not part of the contract. See [ADR 0011](adr/0011-account-identity-and-contract-states.md).
-- **Ordering:** none guaranteed. The receiver keeps the highest `version` per account and ignores lower ones.
+- **Ordering and duplicates:** no ordering is guaranteed. The receiver keeps the highest `version` per account and ignores equal or lower ones, which also makes redeliveries no-ops.
 - **Delivery:** a 2xx means delivered. Anything else, or a timeout (5 seconds), is retried with exponential backoff for about a day, then sent to the DLQ and an alarm fires. For an `active` account, the next sync's event heals a gap. A `needs_reauth` account isn't synced again, so a lost event for it stays lost until the DLQ is redriven (a runbook step).
 - **Never in a payload:** tokens, token expiry times, or any field marked secret.
 
@@ -222,7 +222,7 @@ Powertools for AWS Lambda (Python): structured JSON logs, EMF metrics and X-Ray 
 
 - **IaC:** AWS CDK in Python, with two stacks, `TokenKeeper` and `DemoReceiver`, plus a tiny `Budget` stack deployed first ([ADR 0006](adr/0006-aws-cdk-python-for-iac.md)).
 - **Layout:** `src/token_keeper/` for the app (Python 3.12), `infra/` for CDK, `receiver/` for the demo receiver, `local/` for the local runner, and `tests/`.
-- **Data that must survive any deploy:** the DynamoDB table and the KMS key are set to `RETAIN`. A table replacement would lose every token, and a deleted key would make every stored token unreadable. CDK assertion tests check both.
+- **Data that must survive any deploy:** Token Keeper's DynamoDB table and the KMS key are set to `RETAIN`. (The demo receiver's table is disposable and is destroyed with its stack.) A table replacement would lose every token, and a deleted key would make every stored token unreadable. CDK assertion tests check both.
 
 ### Local development
 There are two places this runs: a laptop and the one deployed `demo` environment. Handlers are plain Python functions, and most of what the project has to prove is Python logic, so it's built and proven locally first.

@@ -7,14 +7,16 @@ requires-python = ">=3.12,<3.13"
 # Runtime dependencies are what gets bundled into Lambda. boto3 is provided by the
 # Lambda runtime, so it lives in the dev group for local use and tests.
 dependencies = [
+    "aws-lambda-powertools>=3.41.0",
+    "httpx>=0.28.1",
     "jinja2>=3.1",
 ]
 
 [dependency-groups]
 dev = [
     "boto3>=1.35",
-    "boto3-stubs[dynamodb,ssm]>=1.35",
-    "moto[server,dynamodb,ssm]>=5.0",
+    "boto3-stubs[dynamodb,kms,sqs,ssm]>=1.35",
+    "moto[dynamodb,kms,server,sqs,ssm]>=5.0",
     "mypy>=1.13",
     "pytest>=8.3",
     "ruff>=0.8",
@@ -22,6 +24,7 @@ dev = [
     "aws-cdk-lib>=2.170",
     "constructs>=10.4",
     "pytest-timeout>=2.3",
+    "respx>=0.23.1",
 ]
 
 [build-system]

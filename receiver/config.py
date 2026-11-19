@@ -11,9 +11,8 @@ import os
 from dataclasses import dataclass
 from functools import cache
 
-import boto3
-
 from token_keeper.contract import webhooks
+from token_keeper.ssm import secret as _secret
 
 
 @dataclass(frozen=True)
@@ -26,18 +25,6 @@ class Config:
     public_url: str
     app_id: str = "demo"
     demo_user: str = "u_demo"
-
-
-def _secret(name: str) -> str:
-    direct = os.environ.get(name)
-    if direct:
-        return direct
-    param = os.environ.get(f"{name}_PARAM")
-    if not param:
-        raise RuntimeError(f"set {name} or {name}_PARAM")
-    ssm = boto3.client("ssm")
-    value: str = ssm.get_parameter(Name=param, WithDecryption=True)["Parameter"]["Value"]
-    return value
 
 
 @cache

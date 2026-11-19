@@ -116,5 +116,6 @@ class DemoReceiverStack(Stack):
                 # create the route first or the stage fails ("Unable to find Route").
                 stage.node.add_dependency(*routes)
 
-        CfnOutput(self, "ReceiverUrl", value=f"{api.api_endpoint}/")
+        self.public_url = f"{api.api_endpoint}/"
+        CfnOutput(self, "ReceiverUrl", value=self.public_url)
         CfnOutput(self, "WebhookUrl", value=f"{api.api_endpoint}/webhooks/token-keeper")

@@ -3,7 +3,7 @@
     uv run python -m local.send_event --version 2 --name "Octo Demo"
     uv run python -m local.send_event --version 3 --state needs_reauth --reason revoked
 
-Stands in for Token Keeper's deliverer until slice 2. The data is made up.
+Useful for receiver work without going through GitHub. The data is made up.
 """
 
 from __future__ import annotations

@@ -12,7 +12,13 @@ from aws_cdk.assertions import Match, Template
 
 from infra.stacks.budget import BudgetStack
 from infra.stacks.demo_receiver import SECRET_PARAMS, DemoReceiverStack
+from infra.stacks.token_keeper import SECRET_PARAMS as TK_SECRET_PARAMS
+from infra.stacks.token_keeper import TokenKeeperStack
 from receiver.store import KEY_SCHEMA
+from token_keeper.handlers.deliverer import MAX_RECEIVES
+from token_keeper.store import ATTRIBUTE_DEFINITIONS as TK_ATTRIBUTE_DEFINITIONS
+from token_keeper.store import KEY_SCHEMA as TK_KEY_SCHEMA
+from token_keeper.store import TTL_ATTRIBUTE
 
 ENV = cdk.Environment(account="111111111111", region="us-east-1")
 
@@ -160,3 +166,173 @@ def test_lambda_permissions_are_exactly_what_the_handler_needs(receiver: Templat
         for name in SECRET_PARAMS.values()
     }
     assert _grants(receiver) == expected
+
+
+# Token Keeper ------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def token_keeper(tmp_path_factory: pytest.TempPathFactory) -> Template:
+    code_dir: Path = tmp_path_factory.mktemp("tk-code")
+    (code_dir / "index.py").write_text("")
+    app = cdk.App()
+    stack = TokenKeeperStack(
+        app,
+        "TokenKeeper",
+        code=lambda_.Code.from_asset(str(code_dir)),
+        receiver_url="https://receiver.invalid/",
+        github_client_id="Iv23-test",
+        env=ENV,
+    )
+    return Template.from_stack(stack)
+
+
+def _role_of(template: Template, handler: str) -> str:
+    functions = template.find_resources(
+        "AWS::Lambda::Function", {"Properties": {"Handler": handler}}
+    )
+    (function,) = functions.values()
+    role: str = function["Properties"]["Role"]["Fn::GetAtt"][0]
+    return role
+
+
+def _grants_by_role(template: Template) -> dict[str, set[tuple[str, str]]]:
+    by_role: dict[str, set[tuple[str, str]]] = {}
+    for policy in template.find_resources("AWS::IAM::Policy").values():
+        (role,) = policy["Properties"]["Roles"]
+        pairs = by_role.setdefault(role["Ref"], set())
+        for statement in policy["Properties"]["PolicyDocument"]["Statement"]:
+            assert statement["Effect"] == "Allow"
+            actions = statement["Action"]
+            resources = statement["Resource"]
+            for action in [actions] if isinstance(actions, str) else actions:
+                for resource in resources if isinstance(resources, list) else [resources]:
+                    pairs.add((action, _flatten(resource)))
+    return by_role
+
+
+def test_table_and_key_are_retained(token_keeper: Template) -> None:
+    for resource_type in ("AWS::DynamoDB::Table", "AWS::KMS::Key"):
+        (resource,) = token_keeper.find_resources(resource_type).values()
+        assert resource["DeletionPolicy"] == "Retain"
+        assert resource["UpdateReplacePolicy"] == "Retain"
+
+
+def test_table_matches_local_schema(token_keeper: Template) -> None:
+    token_keeper.has_resource_properties(
+        "AWS::DynamoDB::Table",
+        {
+            "KeySchema": TK_KEY_SCHEMA,
+            "AttributeDefinitions": TK_ATTRIBUTE_DEFINITIONS,
+            "TimeToLiveSpecification": {"AttributeName": TTL_ATTRIBUTE, "Enabled": True},
+            "BillingMode": "PAY_PER_REQUEST",
+        },
+    )
+
+
+def test_only_the_callback_can_decrypt(token_keeper: Template) -> None:
+    grants = _grants_by_role(token_keeper)
+    callback = _role_of(token_keeper, "token_keeper.handlers.callback.handler")
+    decrypters = {
+        role for role, pairs in grants.items() if any(a == "kms:Decrypt" for a, _ in pairs)
+    }
+    assert decrypters == {callback}
+    # And nothing anywhere grants kms:* or a wildcard action.
+    for pairs in grants.values():
+        assert not any(action.endswith("*") for action, _ in pairs)
+
+
+def test_each_role_has_exactly_what_its_handler_needs(token_keeper: Template) -> None:
+    (table_id,) = token_keeper.find_resources("AWS::DynamoDB::Table")
+    (key_id,) = token_keeper.find_resources("AWS::KMS::Key")
+    queues = token_keeper.find_resources(
+        "AWS::SQS::Queue", {"Properties": {"RedrivePolicy": Match.any_value()}}
+    )
+    (queue_id,) = queues
+    table, key, queue = f"${{{table_id}.Arn}}", f"${{{key_id}.Arn}}", f"${{{queue_id}.Arn}}"
+
+    def ssm(name: str) -> set[tuple[str, str]]:
+        arn = f"arn:${{AWS::Partition}}:ssm:{ENV.region}:{ENV.account}:parameter{name}"
+        return {
+            (action, arn)
+            for action in (
+                "ssm:DescribeParameters",
+                "ssm:GetParameter",
+                "ssm:GetParameterHistory",
+                "ssm:GetParameters",
+            )
+        }
+
+    expected = {
+        "token_keeper.handlers.connect.handler": {("kms:Encrypt", key), ("dynamodb:PutItem", table)}
+        | ssm(TK_SECRET_PARAMS["CONNECT_LINK_SECRET_PARAM"]),
+        "token_keeper.handlers.callback.handler": {
+            ("kms:Encrypt", key),
+            ("kms:Decrypt", key),
+            ("dynamodb:GetItem", table),
+            ("dynamodb:DeleteItem", table),
+            ("dynamodb:PutItem", table),
+            ("dynamodb:UpdateItem", table),
+            ("dynamodb:ConditionCheckItem", table),
+            ("sqs:SendMessage", queue),
+            ("sqs:GetQueueAttributes", queue),
+            ("sqs:GetQueueUrl", queue),
+        }
+        | ssm(TK_SECRET_PARAMS["GITHUB_CLIENT_SECRET_PARAM"]),
+        "token_keeper.handlers.deliverer.handler": {
+            ("dynamodb:Query", table),
+            ("sqs:ReceiveMessage", queue),
+            ("sqs:DeleteMessage", queue),
+            ("sqs:ChangeMessageVisibility", queue),
+            ("sqs:GetQueueAttributes", queue),
+            ("sqs:GetQueueUrl", queue),
+        }
+        | ssm(TK_SECRET_PARAMS["WEBHOOK_SECRET_PARAM"]),
+    }
+    grants = _grants_by_role(token_keeper)
+    assert set(grants) == {_role_of(token_keeper, h) for h in expected}
+    for handler_path, pairs in expected.items():
+        assert grants[_role_of(token_keeper, handler_path)] == pairs, handler_path
+
+
+def test_delivery_queue_has_a_dlq_and_partial_batch_failures(token_keeper: Template) -> None:
+    token_keeper.has_resource_properties(
+        "AWS::SQS::Queue",
+        {"RedrivePolicy": Match.object_like({"maxReceiveCount": MAX_RECEIVES})},
+    )
+    token_keeper.resource_count_is("AWS::SQS::Queue", 2)
+    token_keeper.has_resource_properties(
+        "AWS::Lambda::EventSourceMapping",
+        {"FunctionResponseTypes": ["ReportBatchItemFailures"]},
+    )
+
+
+def test_token_keeper_secrets_are_ssm_names_and_logs_kept_two_weeks(
+    token_keeper: Template,
+) -> None:
+    functions = token_keeper.find_resources("AWS::Lambda::Function")
+    assert len(functions) == 3
+    for function in functions.values():
+        variables = function["Properties"]["Environment"]["Variables"]
+        for param_env in TK_SECRET_PARAMS:
+            assert param_env.removesuffix("_PARAM") not in variables
+        assert function["Properties"]["Architectures"] == ["arm64"]
+    log_groups = token_keeper.find_resources("AWS::Logs::LogGroup")
+    assert len(log_groups) == 3
+    assert all(g["Properties"]["RetentionInDays"] == 14 for g in log_groups.values())
+
+
+def test_token_keeper_api_routes_and_throttle(token_keeper: Template) -> None:
+    routes = token_keeper.find_resources("AWS::ApiGatewayV2::Route")
+    assert {r["Properties"]["RouteKey"] for r in routes.values()} == {
+        "GET /connect",
+        "GET /callback",
+    }
+    token_keeper.has_resource_properties(
+        "AWS::ApiGatewayV2::Stage",
+        {
+            "DefaultRouteSettings": Match.object_like(
+                {"ThrottlingRateLimit": 5, "ThrottlingBurstLimit": 10}
+            )
+        },
+    )

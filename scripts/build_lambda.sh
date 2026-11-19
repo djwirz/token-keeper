@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Builds build/receiver: the receiver's Lambda bundle for arm64, Python 3.12.
+# Builds build/lambda: one bundle for every Lambda (the receiver and Token Keeper's
+# handlers), for arm64, Python 3.12.
 # Third-party wheels are fetched for the Lambda platform by uv, so no Docker is needed.
 # boto3 is left out on purpose: the Lambda runtime provides it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-OUT=build/receiver
+OUT=build/lambda
 rm -rf "$OUT"
 mkdir -p "$OUT"
 

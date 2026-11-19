@@ -34,6 +34,19 @@ def to_event(method: str, target: str, headers: dict[str, str], body: bytes) -> 
     }
 
 
+def router(routes: dict[tuple[str, str], LambdaHandler]) -> LambdaHandler:
+    """One handler that dispatches on (method, path), like API Gateway routes."""
+
+    def dispatch(event: dict[str, Any], context: object) -> dict[str, Any]:
+        key = (event["requestContext"]["http"]["method"], event["rawPath"])
+        target = routes.get(key)
+        if target is None:
+            return {"statusCode": 404, "headers": {}, "body": ""}
+        return target(event, context)
+
+    return dispatch
+
+
 def make_server(handler: LambdaHandler, host: str, port: int) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def _dispatch(self) -> None:

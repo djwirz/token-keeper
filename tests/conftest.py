@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
 
 import boto3
@@ -73,3 +75,55 @@ def http_event(
         "body": body,
         "isBase64Encoded": False,
     }
+
+
+# Token Keeper ------------------------------------------------------------------
+
+TK_TABLE = "token-keeper-test"
+TK_PUBLIC_URL = "http://localhost:8001"
+RECEIVER_WEBHOOK_URL = "http://localhost:8000/webhooks/token-keeper"
+GITHUB_CLIENT_ID = "Iv23-test-client-id"
+GITHUB_CLIENT_SECRET = "test-client-secret-not-real"
+
+
+@dataclass(frozen=True)
+class TokenKeeperEnv:
+    queue_url: str
+    dlq_url: str
+    key_id: str
+
+
+@pytest.fixture
+def tk_env(receiver_env: None, monkeypatch: pytest.MonkeyPatch) -> Iterator[TokenKeeperEnv]:
+    """Token Keeper's table, key and queues on moto, inside receiver_env's mock_aws."""
+    from token_keeper.handlers import _shared, deliverer
+    from token_keeper.store import ATTRIBUTE_DEFINITIONS as TK_ATTRS
+    from token_keeper.store import KEY_SCHEMA as TK_KEYS
+
+    boto3.client("dynamodb").create_table(
+        TableName=TK_TABLE,
+        KeySchema=TK_KEYS,  # type: ignore[arg-type]
+        AttributeDefinitions=TK_ATTRS,  # type: ignore[arg-type]
+        BillingMode="PAY_PER_REQUEST",
+    )
+    key_id = boto3.client("kms").create_key()["KeyMetadata"]["KeyId"]
+    sqs = boto3.client("sqs")
+    dlq_url = sqs.create_queue(QueueName="delivery-dlq")["QueueUrl"]
+    queue_url = sqs.create_queue(QueueName="delivery")["QueueUrl"]
+    env = {
+        "TOKEN_KEEPER_TABLE": TK_TABLE,
+        "KMS_KEY_ID": key_id,
+        "DELIVERY_QUEUE_URL": queue_url,
+        "TOKEN_KEEPER_PUBLIC_URL": TK_PUBLIC_URL,
+        "GITHUB_CLIENT_ID": GITHUB_CLIENT_ID,
+        "GITHUB_CLIENT_SECRET": GITHUB_CLIENT_SECRET,
+        "ALLOWED_RETURN_TO": json.dumps({"demo": [PUBLIC_URL]}),
+        "RECEIVER_WEBHOOK_URL": RECEIVER_WEBHOOK_URL,
+    }
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    _shared.reset()
+    deliverer._sqs.cache_clear()
+    yield TokenKeeperEnv(queue_url=queue_url, dlq_url=dlq_url, key_id=key_id)
+    _shared.reset()
+    deliverer._sqs.cache_clear()

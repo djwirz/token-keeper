@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Token Keeper demo</title>
+  <style>
+    :root { color-scheme: light dark; --muted: #6b7280; --ok: #15803d; --warn: #b45309; --line: #d1d5db; }
+    body { font: 16px/1.5 system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+    .lede, .muted { color: var(--muted); }
+    .banner { padding: .6rem .8rem; border: 1px solid var(--line); border-radius: .4rem; margin: 1rem 0; }
+    .banner.error { border-color: var(--warn); }
+    .card { border: 1px solid var(--line); border-radius: .5rem; padding: 1rem; margin: 1rem 0; }
+    .head { display: flex; gap: .8rem; align-items: center; }
+    .head img { width: 56px; height: 56px; border-radius: 50%; }
+    .state { font-weight: 600; }
+    .state.active { color: var(--ok); }
+    .state.needs_reauth { color: var(--warn); }
+    ul { padding-left: 1.2rem; }
+    form { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: 1.5rem; }
+    input, button { font: inherit; padding: .35rem .6rem; }
+  </style>
+</head>
+<body>
+  <h1>Token Keeper demo</h1>
+  <p class="lede">A stand-in main app. It shows what Token Keeper reports about each connected GitHub account.</p>
+
+  {% if message %}<p class="banner">{{ message }}</p>{% endif %}
+  {% if error %}<p class="banner error">{{ error }}</p>{% endif %}
+
+  {% for a in accounts %}
+  <section class="card">
+    <div class="head">
+      {% if a.snapshot and a.snapshot.profile.avatar_url and a.snapshot.profile.avatar_url.startswith("https://") %}
+      <img src="{{ a.snapshot.profile.avatar_url }}" alt="">
+      {% endif %}
+      <div>
+        <div><strong>{{ (a.snapshot and a.snapshot.profile.name) or a.github.login }}</strong>
+          <span class="muted">@{{ a.github.login }}</span></div>
+        <div class="state {{ a.state }}">
+          {% if a.state == "active" %}Connected{% else %}Needs re-auth ({{ a.state_reason }}){% endif %}
+        </div>
+      </div>
+    </div>
+    {% if a.snapshot %}
+    <p class="muted">Last synced {{ a.snapshot.fetched_at }} · {{ a.snapshot.profile.public_repos }} public repos · {{ a.snapshot.profile.followers }} followers</p>
+    {% if a.snapshot.recent_events %}
+    <ul>
+      {% for e in a.snapshot.recent_events %}<li>{{ e.type }} on {{ e.repo }} <span class="muted">{{ e.created_at }}</span></li>{% endfor %}
+    </ul>
+    {% else %}<p class="muted">No recent public activity.</p>{% endif %}
+    {% endif %}
+    <p class="muted">Version {{ a.version }}</p>
+  </section>
+  {% else %}
+  <p class="muted">No accounts connected yet.</p>
+  {% endfor %}
+
+  <form method="post" action="/connect">
+    <label for="passcode">Demo passcode</label>
+    <input id="passcode" name="passcode" type="password" autocomplete="off" required>
+    <button type="submit">Connect GitHub</button>
+  </form>
+</body>
+</html>

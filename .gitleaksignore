@@ -1,0 +1,5 @@
+# Known false positives, one exact finding each (commit:file:rule:line).
+# A fake, deliberately too-short test webhook secret (9 bytes). The line was fixed in
+# the next commit by splitting the string like the other test secrets; this entry only
+# covers the copy in the already-pushed commit.
+cc3963a0057b0d3e3bc7642682bfede50f7f4df3:tests/test_receiver.py:generic-api-key:162

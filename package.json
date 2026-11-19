@@ -1,0 +1,8 @@
+{
+  "name": "token-keeper-infra",
+  "private": true,
+  "description": "Pins the AWS CDK CLI. Run it with npx cdk.",
+  "devDependencies": {
+    "aws-cdk": "2.1148.1"
+  }
+}

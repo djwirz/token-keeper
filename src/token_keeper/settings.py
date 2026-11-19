@@ -5,7 +5,7 @@ the KMS key, so their IAM roles don't need them (spec §9). Secrets come from th
 environment locally or SSM in AWS (``token_keeper.ssm``).
 
 Environment:
-- ``TOKEN_KEEPER_TABLE``, ``KMS_KEY_ID``, ``DELIVERY_QUEUE_URL``
+- ``TOKEN_KEEPER_TABLE``, ``KMS_KEY_ID``, ``DELIVERY_QUEUE_URL``, ``SYNC_QUEUE_URL``
 - ``TOKEN_KEEPER_PUBLIC_URL``: this service's base URL; GitHub returns to ``<it>/callback``
 - From the environment or SSM (``…_PARAM``, ADR 0014):
   - ``GITHUB_CLIENT_ID`` (not a secret)
@@ -39,6 +39,10 @@ class Settings:
     @cached_property
     def delivery_queue_url(self) -> str:
         return os.environ["DELIVERY_QUEUE_URL"]
+
+    @cached_property
+    def sync_queue_url(self) -> str:
+        return os.environ["SYNC_QUEUE_URL"]
 
     @cached_property
     def callback_url(self) -> str:

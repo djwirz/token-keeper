@@ -14,13 +14,19 @@ from aws_cdk.assertions import Match, Template
 from infra.stacks.budget import BudgetStack
 from infra.stacks.demo_receiver import SECRET_PARAMS, DemoReceiverStack
 from infra.stacks.shared import CONNECT_URL_PARAM, GITHUB_CLIENT_ID_PARAM, RECEIVER_URL_PARAM
-from infra.stacks.token_keeper import DELIVERER_BATCH_SIZE, TokenKeeperStack
+from infra.stacks.token_keeper import (
+    DELIVERER_BATCH_SIZE,
+    WORKER_BATCH_SIZE,
+    WORKER_TIMEOUT_SECONDS,
+    TokenKeeperStack,
+)
 from infra.stacks.token_keeper import SECRET_PARAMS as TK_SECRET_PARAMS
 from receiver.store import KEY_SCHEMA
 from token_keeper.handlers.deliverer import MAX_RECEIVES
+from token_keeper.handlers.worker import MAX_RECEIVES as SYNC_MAX_RECEIVES
 from token_keeper.store import ATTRIBUTE_DEFINITIONS as TK_ATTRIBUTE_DEFINITIONS
+from token_keeper.store import GLOBAL_SECONDARY_INDEXES, LEASE_SECONDS, TTL_ATTRIBUTE
 from token_keeper.store import KEY_SCHEMA as TK_KEY_SCHEMA
-from token_keeper.store import TTL_ATTRIBUTE
 
 ENV = cdk.Environment(account="111111111111", region="us-east-1")
 
@@ -222,33 +228,50 @@ def test_table_matches_local_schema(token_keeper: Template) -> None:
         "AWS::DynamoDB::Table",
         {
             "KeySchema": TK_KEY_SCHEMA,
-            "AttributeDefinitions": TK_ATTRIBUTE_DEFINITIONS,
+            "AttributeDefinitions": Match.array_with(TK_ATTRIBUTE_DEFINITIONS),
+            # The due index, keys only (no ciphertext copied), as moto and the runner build it.
+            "GlobalSecondaryIndexes": GLOBAL_SECONDARY_INDEXES,
             "TimeToLiveSpecification": {"AttributeName": TTL_ATTRIBUTE, "Enabled": True},
             "BillingMode": "PAY_PER_REQUEST",
         },
     )
 
 
-def test_only_the_callback_can_decrypt(token_keeper: Template) -> None:
+def test_only_the_callback_and_worker_can_decrypt(token_keeper: Template) -> None:
     grants = _grants_by_role(token_keeper)
-    callback = _role_of(token_keeper, "token_keeper.handlers.callback.handler")
     decrypters = {
         role for role, pairs in grants.items() if any(a == "kms:Decrypt" for a, _ in pairs)
     }
-    assert decrypters == {callback}
+    assert decrypters == {
+        _role_of(token_keeper, "token_keeper.handlers.callback.handler"),
+        _role_of(token_keeper, "token_keeper.handlers.worker.handler"),
+    }
     # And nothing anywhere grants kms:* or a wildcard action.
     for pairs in grants.values():
         assert not any(action.endswith("*") for action, _ in pairs)
 
 
+def _logical_id(template: Template, resource_type: str, prefix: str) -> str:
+    (logical,) = [k for k in template.find_resources(resource_type) if k.startswith(prefix)]
+    return logical
+
+
 def test_each_role_has_exactly_what_its_handler_needs(token_keeper: Template) -> None:
     (table_id,) = token_keeper.find_resources("AWS::DynamoDB::Table")
     (key_id,) = token_keeper.find_resources("AWS::KMS::Key")
-    queues = token_keeper.find_resources(
-        "AWS::SQS::Queue", {"Properties": {"RedrivePolicy": Match.any_value()}}
-    )
-    (queue_id,) = queues
+    queue_id = _logical_id(token_keeper, "AWS::SQS::Queue", "DeliveryQueue")
+    sync_id = _logical_id(token_keeper, "AWS::SQS::Queue", "SyncQueue")
+    planner_id = _logical_id(token_keeper, "AWS::Lambda::Function", "Planner")
     table, key, queue = f"${{{table_id}.Arn}}", f"${{{key_id}.Arn}}", f"${{{queue_id}.Arn}}"
+    sync_queue = f"${{{sync_id}.Arn}}"
+    send = {"sqs:SendMessage", "sqs:GetQueueAttributes", "sqs:GetQueueUrl"}
+    consume = {
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:ChangeMessageVisibility",
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl",
+    }
 
     def ssm(name: str) -> set[tuple[str, str]]:
         arn = f"arn:${{AWS::Partition}}:ssm:{ENV.region}:{ENV.account}:parameter{name}"
@@ -274,38 +297,94 @@ def test_each_role_has_exactly_what_its_handler_needs(token_keeper: Template) ->
             ("dynamodb:DeleteItem", table),
             ("dynamodb:PutItem", table),
             ("dynamodb:UpdateItem", table),
-            ("sqs:SendMessage", queue),
-            ("sqs:GetQueueAttributes", queue),
-            ("sqs:GetQueueUrl", queue),
         }
+        | {(a, queue) for a in send}
+        # The immediate sync after connect (spec §4).
+        | {(a, sync_queue) for a in send}
         | ssm(TK_SECRET_PARAMS["GITHUB_CLIENT_SECRET_PARAM"])
         | ssm(GITHUB_CLIENT_ID_PARAM),
-        "token_keeper.handlers.deliverer.handler": {
-            ("dynamodb:Query", table),
-            ("sqs:ReceiveMessage", queue),
-            ("sqs:DeleteMessage", queue),
-            ("sqs:ChangeMessageVisibility", queue),
-            ("sqs:GetQueueAttributes", queue),
-            ("sqs:GetQueueUrl", queue),
-        }
+        "token_keeper.handlers.deliverer.handler": {("dynamodb:Query", table)}
+        | {(a, queue) for a in consume}
         | ssm(TK_SECRET_PARAMS["WEBHOOK_SECRET_PARAM"])
         | ssm(RECEIVER_URL_PARAM),
+        # Spec §9: query the due index (and nothing else), push next_due_at, enqueue.
+        "token_keeper.handlers.planner.handler": {
+            ("dynamodb:Query", f"{table}/index/due"),
+            ("dynamodb:UpdateItem", table),
+        }
+        | {(a, sync_queue) for a in send},
+        "token_keeper.handlers.worker.handler": {
+            ("kms:Encrypt", key),
+            ("kms:Decrypt", key),
+            ("dynamodb:UpdateItem", table),
+            ("dynamodb:PutItem", table),
+        }
+        | {(a, sync_queue) for a in consume}
+        | {(a, queue) for a in send}
+        | ssm(TK_SECRET_PARAMS["GITHUB_CLIENT_SECRET_PARAM"])
+        | ssm(GITHUB_CLIENT_ID_PARAM),
     }
     grants = _grants_by_role(token_keeper)
-    assert set(grants) == {_role_of(token_keeper, h) for h in expected}
+    scheduler_role = _logical_id(token_keeper, "AWS::IAM::Role", "SchedulerRoleForTarget")
+    planner = f"${{{planner_id}.Arn}}"
+    assert set(grants) == {_role_of(token_keeper, h) for h in expected} | {scheduler_role}
     for handler_path, pairs in expected.items():
         assert grants[_role_of(token_keeper, handler_path)] == pairs, handler_path
+    # The schedule's role can invoke the planner and nothing else.
+    assert grants[scheduler_role] == {
+        ("lambda:InvokeFunction", planner),
+        ("lambda:InvokeFunction", f"{planner}:*"),
+    }
 
 
-def test_delivery_queue_has_a_dlq_and_partial_batch_failures(token_keeper: Template) -> None:
-    token_keeper.has_resource_properties(
-        "AWS::SQS::Queue",
-        {"RedrivePolicy": Match.object_like({"maxReceiveCount": MAX_RECEIVES})},
+def test_both_queues_have_a_dlq_and_partial_batch_failures(token_keeper: Template) -> None:
+    queues = token_keeper.find_resources("AWS::SQS::Queue")
+    assert len(queues) == 4
+    for prefix, receives in (("DeliveryQueue", MAX_RECEIVES), ("SyncQueue", SYNC_MAX_RECEIVES)):
+        queue = queues[_logical_id(token_keeper, "AWS::SQS::Queue", prefix)]
+        dlq = prefix.replace("Queue", "Dlq")
+        policy = queue["Properties"]["RedrivePolicy"]
+        assert policy["maxReceiveCount"] == receives
+        assert policy["deadLetterTargetArn"]["Fn::GetAtt"][0].startswith(dlq)
+    mappings = token_keeper.find_resources("AWS::Lambda::EventSourceMapping").values()
+    assert len(mappings) == 2
+    for mapping in mappings:
+        assert mapping["Properties"]["FunctionResponseTypes"] == ["ReportBatchItemFailures"]
+
+
+def _function(template: Template, module: str) -> dict[str, Any]:
+    functions = template.find_resources(
+        "AWS::Lambda::Function",
+        {"Properties": {"Handler": f"token_keeper.handlers.{module}.handler"}},
     )
-    token_keeper.resource_count_is("AWS::SQS::Queue", 2)
-    token_keeper.has_resource_properties(
+    (function,) = functions.values()
+    return dict(function)
+
+
+def test_worker_cannot_outlive_its_lease(token_keeper: Template) -> None:
+    # ADR 0004/0015: a worker that outlived its lease could refresh with a pair a second
+    # worker had already rotated.
+    worker = _function(token_keeper, "worker")
+    assert worker["Properties"]["Timeout"] == WORKER_TIMEOUT_SECONDS < LEASE_SECONDS
+    sync_id = _logical_id(token_keeper, "AWS::SQS::Queue", "SyncQueue")
+    (mapping,) = token_keeper.find_resources(
         "AWS::Lambda::EventSourceMapping",
-        {"FunctionResponseTypes": ["ReportBatchItemFailures"]},
+        {"Properties": {"EventSourceArn": {"Fn::GetAtt": [sync_id, "Arn"]}}},
+    ).values()
+    assert mapping["Properties"]["BatchSize"] == WORKER_BATCH_SIZE == 1
+    queue = token_keeper.find_resources("AWS::SQS::Queue")[sync_id]
+    assert queue["Properties"]["VisibilityTimeout"] >= 6 * WORKER_TIMEOUT_SECONDS
+
+
+def test_planner_runs_every_15_minutes(token_keeper: Template) -> None:
+    planner_id = _logical_id(token_keeper, "AWS::Lambda::Function", "Planner")
+    token_keeper.has_resource_properties(
+        "AWS::Scheduler::Schedule",
+        {
+            "ScheduleExpression": "rate(15 minutes)",
+            "State": "ENABLED",
+            "Target": Match.object_like({"Arn": {"Fn::GetAtt": [planner_id, "Arn"]}}),
+        },
     )
 
 
@@ -313,14 +392,14 @@ def test_token_keeper_secrets_are_ssm_names_and_logs_kept_two_weeks(
     token_keeper: Template,
 ) -> None:
     functions = token_keeper.find_resources("AWS::Lambda::Function")
-    assert len(functions) == 3
+    assert len(functions) == 5
     for function in functions.values():
         variables = function["Properties"]["Environment"]["Variables"]
         for param_env in TK_SECRET_PARAMS:
             assert param_env.removesuffix("_PARAM") not in variables
         assert function["Properties"]["Architectures"] == ["arm64"]
     log_groups = token_keeper.find_resources("AWS::Logs::LogGroup")
-    assert len(log_groups) == 3
+    assert len(log_groups) == 5
     assert all(g["Properties"]["RetentionInDays"] == 14 for g in log_groups.values())
 
 
@@ -344,15 +423,14 @@ def test_deliverer_timeout_covers_its_whole_batch(token_keeper: Template) -> Non
     # A batch that outlives the Lambda is killed before any backoff is set, and every
     # message burns a receive per visibility timeout (PR 3 review). Allow 10 s per
     # message: one POST is at most 2 s to connect plus 5 s to read.
-    (mapping,) = token_keeper.find_resources("AWS::Lambda::EventSourceMapping").values()
+    queue_id = _logical_id(token_keeper, "AWS::SQS::Queue", "DeliveryQueue")
+    (mapping,) = token_keeper.find_resources(
+        "AWS::Lambda::EventSourceMapping",
+        {"Properties": {"EventSourceArn": {"Fn::GetAtt": [queue_id, "Arn"]}}},
+    ).values()
     batch = mapping["Properties"]["BatchSize"]
     assert batch == DELIVERER_BATCH_SIZE == 1
-    functions = token_keeper.find_resources(
-        "AWS::Lambda::Function",
-        {"Properties": {"Handler": "token_keeper.handlers.deliverer.handler"}},
-    )
-    (deliverer_fn,) = functions.values()
-    assert deliverer_fn["Properties"]["Timeout"] >= batch * 10
+    assert _function(token_keeper, "deliverer")["Properties"]["Timeout"] >= batch * 10
 
 
 def test_stacks_share_urls_through_ssm_not_exports(

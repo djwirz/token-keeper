@@ -59,3 +59,31 @@ def mock_github(
         return_value=httpx.Response(user_status, json=user or user_body())
     )
     return token_route, user_route
+
+
+ROTATED_ACCESS_TOKEN = "ghu_" + "FakeAccessToken2222NotReal2222222222"
+ROTATED_REFRESH_TOKEN = "ghr_" + "FakeRefreshToken222NotReal" + "2" * 50
+
+
+def events_body(login: str = "octo-demo", count: int = 12) -> list[dict[str, Any]]:
+    """More than ten, so the worker's limit is exercised."""
+    return [
+        {
+            "id": str(1000 + i),
+            "type": "PushEvent" if i % 2 else "WatchEvent",
+            "actor": {"login": login},
+            "repo": {"id": i, "name": f"{login}/repo-{i}"},
+            "payload": {},
+            "public": True,
+            "created_at": f"2026-11-18T{10 + i % 10:02d}:00:00Z",
+        }
+        for i in range(count)
+    ]
+
+
+def mock_events(
+    router: respx.MockRouter, login: str = "octo-demo", status: int = 200
+) -> respx.Route:
+    return router.get(f"{github.API_URL}/users/{login}/events/public").mock(
+        return_value=httpx.Response(status, json=events_body(login) if status == 200 else {})
+    )

@@ -2,21 +2,29 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+import httpx
 import pytest
 import respx
 
 from local import run
 from local.send_event import send, synthetic_event
 from receiver import config, handler
-from tests.github_fakes import mock_github
+from tests.github_fakes import (
+    ROTATED_ACCESS_TOKEN,
+    ROTATED_REFRESH_TOKEN,
+    mock_events,
+    mock_github,
+    token_body,
+)
 from token_keeper.handlers import _shared, deliverer
 
 
@@ -31,7 +39,10 @@ def _start(env_file: Path) -> Iterator[run.Running]:
     saved = dict(os.environ)
     _clear_caches()
     running = run.start(
-        receiver_port=run.free_port(), env_file=env_file, token_keeper_port=run.free_port()
+        receiver_port=run.free_port(),
+        env_file=env_file,
+        token_keeper_port=run.free_port(),
+        control_port=run.free_port(),
     )
     try:
         yield running
@@ -102,13 +113,25 @@ def test_runner_without_github_app_starts_only_the_receiver(runner: run.Running)
     assert runner.token_keeper_url is None
 
 
+def _wait_for(condition: Callable[[], bool], seconds: float = 10) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.2)
+    return False
+
+
 def test_connect_flow_end_to_end(runner_with_github: run.Running, tmp_path: Path) -> None:
-    """Passcode → signed link → /connect → (GitHub, faked) → /callback → delivery → page."""
+    """Passcode → signed link → /connect → (GitHub, faked) → /callback → delivery → page,
+    then the immediate sync's events, then a forced refresh through the local control."""
     passcode = run.load_or_create_secrets(tmp_path / ".env.local")["DEMO_PASSCODE"]
     with respx.mock(assert_all_called=False) as router:
         # Only GitHub is faked; the deliverer's POST to the local receiver goes through.
         router.route(host="localhost").pass_through()
-        mock_github(router)
+        router.route(host="127.0.0.1").pass_through()
+        token_route, _ = mock_github(router)
+        mock_events(router)
 
         form = urllib.request.Request(  # noqa: S310 (local http URL)
             runner_with_github.receiver_url + "connect",
@@ -125,16 +148,30 @@ def test_connect_flow_end_to_end(runner_with_github: run.Running, tmp_path: Path
         back = _location(f"{runner_with_github.token_keeper_url}/callback?code=c&state={state}")
         assert back == f"{runner_with_github.receiver_url}?result=connected"
 
-        # The drain thread delivers account.connected to the receiver.
-        deadline = time.monotonic() + 10
-        page = ""
-        while time.monotonic() < deadline:
-            page = _page(runner_with_github.receiver_url)
-            if "@octo-demo" in page:
-                break
-            time.sleep(0.2)
-    assert "@octo-demo" in page
-    assert "Octo Demo" in page
+        # The drain threads deliver account.connected, then run the immediate sync and
+        # deliver its account.updated, which carries the public events.
+        assert _wait_for(
+            lambda: "PushEvent on octo-demo/repo-1" in _page(runner_with_github.receiver_url)
+        )
+        page = _page(runner_with_github.receiver_url)
+        assert "@octo-demo" in page and "Octo Demo" in page
+        assert token_route.call_count == 1  # the code exchange only
+
+        # /expire forces the next sync to refresh (how the live rotation check works).
+        token_route.mock(
+            return_value=httpx.Response(
+                200, json=token_body(ROTATED_ACCESS_TOKEN, ROTATED_REFRESH_TOKEN)
+            )
+        )
+        assert runner_with_github.control_url
+        expire = urllib.request.Request(  # noqa: S310 (local http URL)
+            runner_with_github.control_url + "/expire", data=b"", method="POST"
+        )
+        with urllib.request.urlopen(expire, timeout=5) as response:  # noqa: S310
+            assert json.loads(response.read()) == {"expired": 1, "enqueued": 1}
+        assert _wait_for(lambda: token_route.call_count == 2)
+        sent = parse_qs(token_route.calls.last.request.content.decode())
+        assert sent["grant_type"] == ["refresh_token"]
 
 
 def test_access_log_never_prints_query_strings(

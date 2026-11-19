@@ -6,8 +6,9 @@ import time
 from functools import cache
 
 from token_keeper import settings
-from token_keeper.crypto import Crypto
-from token_keeper.store import Store
+from token_keeper.crypto import Crypto, account_context
+from token_keeper.github import TokenPair
+from token_keeper.store import EncryptedTokens, Store
 
 
 def now() -> int:
@@ -22,6 +23,17 @@ def store() -> Store:
 @cache
 def crypto() -> Crypto:
     return Crypto(settings.get().kms_key_id)
+
+
+def encrypt_tokens(account_id: str, tokens: TokenPair) -> EncryptedTokens:
+    """Encrypt a pair under the ``account_id`` context (ADR 0003) before it's written."""
+    context = account_context(account_id)
+    return EncryptedTokens(
+        access_token_ct=crypto().encrypt(tokens.access_token, context),
+        refresh_token_ct=crypto().encrypt(tokens.refresh_token, context),
+        access_expires_at=tokens.access_expires_at,
+        refresh_expires_at=tokens.refresh_expires_at,
+    )
 
 
 def reset() -> None:

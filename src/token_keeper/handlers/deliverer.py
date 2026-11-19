@@ -29,7 +29,7 @@ from token_keeper.contract.events import (
 )
 from token_keeper.delivery import CORRELATION_ATTRIBUTE
 from token_keeper.handlers._shared import now, store
-from token_keeper.handlers.callback import iso
+from token_keeper.snapshot import iso
 from token_keeper.store import Account
 
 if TYPE_CHECKING:

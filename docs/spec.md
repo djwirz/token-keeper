@@ -65,7 +65,7 @@ It shows AWS serverless (EventBridge Scheduler → SQS → Lambda, DynamoDB), OA
 | Component | Role |
 |---|---|
 | `connect` λ | Validates the signed connect link, creates an OAuth `state` record (with PKCE verifier, TTL'd), and redirects to GitHub. |
-| `callback` λ | Checks `state`, exchanges the code (with the PKCE verifier), fetches `/user`, encrypts tokens, writes the account (§4 "Writes and the lease"), stores a profile-only snapshot, enqueues `account.connected` and an immediate sync, and redirects back to the receiver. |
+| `callback` λ | Checks `state`, exchanges the code (with the PKCE verifier), fetches `/user`, encrypts tokens, writes the account (§4 "Writes and the lease") with `next_due_at` about 30 minutes out (the planner is only the fallback if the immediate sync is lost), stores a profile-only snapshot, enqueues `account.connected` and an immediate sync, and redirects back to the receiver. |
 | `github-webhook` λ | Receives GitHub App webhooks. Verifies `X-Hub-Signature-256`, handles `github_app_authorization` (the user revoked the app): looks up the account by GitHub user id, moves it to `needs_reauth`, deletes its tokens, and enqueues `account.updated`. Ignores other events. See [ADR 0010](adr/0010-github-revocation-webhook.md). |
 | `planner` λ | Runs every 15 minutes from EventBridge Scheduler. Queries `active` accounts whose `next_due_at` has passed, pushes each one's `next_due_at` about 30 minutes ahead (so the next run doesn't enqueue it again), and sends one SQS message per account. |
 | `worker` λ | Consumes `sync-queue`. Takes a lease on the account, refreshes if the access token is near expiry, fetches the snapshot, applies the state machine, bumps `version`, writes, and enqueues a delivery. |
@@ -77,13 +77,13 @@ Rationale and alternatives: [ADR 0004](adr/0004-planner-sqs-worker-schedule.md).
 ### Sync cadence
 - Normal: every **6 hours** per active account, with jitter so accounts spread out.
 - If the access token expires in under 10 minutes when a sync runs, the worker refreshes first. With an 8-hour token and a 6-hour cadence, about half of syncs find a still-valid token and the other half refresh. That keeps the refresh token rotating far inside its 6-month life.
-- After a transient error, the account stays `active` and `next_due_at` backs off exponentially, capped at about an hour (or set to the rate-limit reset time).
+- After a transient error, the account stays `active` and `next_due_at` backs off 15, 30, then 60 minutes, capped there (or set to the rate-limit reset time). Details: [ADR 0015](adr/0015-sync-worker-failures-and-lease-budget.md).
 - Demo knob: a config value can shorten the cadence (e.g. 15 minutes) for recording the GIF.
 
 ### Writes and the lease
-Every change to an Account item is a conditional write that bumps `version`. There are two kinds of writer:
+Every change to an Account item is a conditional write that bumps `version`, the planner's push and the lease included, so versions can skip numbers. There are two kinds of writer:
 
-- **The worker** takes a lease with a conditional update: `(attribute_not_exists(lease_until) OR lease_until < :now) AND state = active`, setting `lease_owner` and `lease_until` (60 seconds), with `ReturnValues=ALL_NEW`. It uses **only the tokens returned by that update**, never anything it read before, and re-checks expiry against them. Its final write is conditional on `lease_owner = :me`, and clears the lease.
+- **The worker** takes a lease with a conditional update: `(attribute_not_exists(lease_until) OR lease_until < :now) AND state = active`, setting `lease_owner` and `lease_until` (60 seconds), with `ReturnValues=ALL_NEW`. It uses **only the tokens returned by that update**, never anything it read before, and re-checks expiry against them. A refreshed pair is written (conditional on `lease_owner = :me`) before it's used. Its final write is conditional on `lease_owner = :me`, and clears the lease. Its Lambda timeout (40 seconds) is below the lease, and it starts no token call with under 20 seconds of lease left ([ADR 0015](adr/0015-sync-worker-failures-and-lease-budget.md)).
 - **Everyone else** (the callback on reconnect, the github-webhook on revocation) takes over: their write clears `lease_owner` and `lease_until` unconditionally and bumps `version`. A worker that was mid-sync then fails its final write, discards whatever it holds (including a freshly rotated pair, which belongs to a grant that's been replaced or revoked), and logs `lease_lost`.
 
 ### Data model (DynamoDB, single table, on-demand)
@@ -99,7 +99,7 @@ Times are Numbers (epoch seconds) and `*_ct` fields are Binary. The state item i
 
 The callback writes Account, User link, GitHub link and the profile-only Snapshot in one transaction. Identity rules are in [ADR 0011](adr/0011-account-identity-and-contract-states.md).
 
-GSI `due`: partition `state`, sort `next_due_at`. The planner queries only `active` with `next_due_at <= now`; `needs_reauth` accounts have no `next_due_at`, so they drop out of the index. One partition per state is a known scaling limit far beyond demo scale, noted for the case study rather than fixed.
+GSI `due`: partition `state`, sort `next_due_at`, keys-only projection (no ciphertext in the index). The planner queries only `active` with `next_due_at <= now`; `needs_reauth` accounts have no `next_due_at`, so they drop out of the index. One partition per state is a known scaling limit far beyond demo scale, noted for the case study rather than fixed.
 
 `*_ct` fields are KMS ciphertext ([ADR 0003](adr/0003-field-level-kms-encryption.md)).
 
@@ -157,7 +157,7 @@ Body: always the **full current state**, read when the event is sent (not when i
 ```
 - **Event types:** `account.connected` (every successful callback, including reconnects) and `account.updated` (every successful sync, and every state change). At connect time the snapshot holds the profile and an empty `recent_events`.
 - **States:** `active` or `needs_reauth`. `state_reason` is `null` when active, and otherwise one of `revoked` (GitHub told us), `refresh_rejected` (`bad_refresh_token`), `refresh_expired`, or `unauthorized` (a 401 that a refresh didn't fix). Transient errors are not part of the contract. See [ADR 0011](adr/0011-account-identity-and-contract-states.md).
-- **Ordering and duplicates:** no ordering is guaranteed. The receiver keeps the highest `version` per account and ignores equal or lower ones, which also makes redeliveries no-ops.
+- **Ordering and duplicates:** no ordering is guaranteed. The receiver keeps the highest `version` per account and ignores equal or lower ones, which also makes redeliveries no-ops. Versions increase but can skip numbers: internal bookkeeping writes bump them too.
 - **Delivery:** a 2xx means delivered. Anything else, or a timeout (5 seconds), is retried with exponential backoff for about a day, then sent to the DLQ and an alarm fires. For an `active` account, the next sync's event heals a gap. A `needs_reauth` account isn't synced again, so a lost event for it stays lost until the DLQ is redriven (a runbook step).
 - **Never in a payload:** tokens, token expiry times, or any field marked secret.
 
@@ -214,7 +214,7 @@ Powertools for AWS Lambda (Python): structured JSON logs, EMF metrics and X-Ray 
 - **Secrets** (GitHub App client secret, GitHub App webhook secret, connect-link secret, outbound webhook signing secret, demo passcode): SSM Parameter Store SecureString, read at cold start, never in the repo, CI logs or PR text. Outbound webhook secret rotation uses Standard Webhooks multi-signature.
 - **OAuth:** a random 32-byte `state` (single-use, TTL'd) plus PKCE S256 ([ADR 0007](adr/0007-signed-connect-links-state-pkce.md)). `return_to` is checked against an exact-match allow-list, so there are no open redirects.
 - **Inbound GitHub webhooks:** signature checked before parsing; the handler can only move an account to `needs_reauth` and delete its tokens, so a forged request that somehow passed could do no more than force a re-auth.
-- **IAM:** least privilege through CDK grants, one role per Lambda. The deliverer and github-webhook roles can't decrypt tokens. The planner can only query the GSI, update `next_due_at`, emit metrics and send to SQS.
+- **IAM:** least privilege through CDK grants, one role per Lambda. The deliverer and github-webhook roles can't decrypt tokens. The planner can only query the GSI, update the Account (`next_due_at` and `version`), emit metrics and send to SQS. Only the callback and worker roles have `kms:Decrypt`.
 - **CI to AWS:** GitHub Actions OIDC. When a job uses an environment, GitHub's OIDC subject is `repo:<owner>/token-keeper:environment:demo` and carries no branch, so the deploy role trusts that subject and the `demo` environment's deployment-branch rule allows only `main`. A separate read-only role trusts `repo:<owner>/token-keeper:pull_request` for `cdk diff`. No AWS keys are stored anywhere.
 - **API edge:** API Gateway HTTP API with route throttling, which limits brute force against `/connect`, `/callback` and the passcode.
 - **Data minimisation:** public profile and public events only, a GitHub App with no permissions, and snapshots overwritten rather than accumulated. On `needs_reauth`, tokens are deleted; the public snapshot stays so the card still shows who needs to reconnect.
@@ -258,8 +258,8 @@ Stretch (not required): an admin "force re-verify" and a second provider.
 Slices 1–3 are local only. Each one also adds the CDK code for what it builds, checked by `cdk synth` and assertion tests in CI, so the first deploy ships infrastructure that has already been reviewed.
 
 1. **Local foundation:** repo skeleton, CI (lint, type, test, gitleaks, `cdk synth`), the webhook contract library (sign and verify with test vectors), connect-link signing with test vectors, the demo receiver running locally (verify, store, status page, passcode-gated connect), and the local runner.
-2. **Connect → callback, locally:** GitHub App (localhost callback), signed links, state and PKCE, encrypted token storage on moto, Powertools logger with the token scrubber and its test. `account.connected` delivered to the local receiver through the deliverer queue. The callback's immediate sync enqueue (§4) waits for the sync queue in slice 3. Until then, the callback sets `next_due_at` to now, so the planner picks up a new account on its first run anyway.
-3. **Sync and refresh, locally:** planner → queue → worker with snapshot, refresh under lease, the state machine and failure handling, and the three concurrency tests. Real refresh-token rotations against Dan's GitHub account.
+2. **Connect → callback, locally:** GitHub App (localhost callback), signed links, state and PKCE, encrypted token storage on moto, Powertools logger with the token scrubber and its test. `account.connected` delivered to the local receiver through the deliverer queue. (The callback's immediate sync enqueue came in slice 3, with the sync queue.)
+3. **Sync and refresh, locally:** planner → queue → worker with snapshot, refresh under lease, the state machine and failure handling, and the three concurrency tests. Real refresh-token rotations against Dan's GitHub account. The store's takeover write for revocation lands here too (the concurrency test needs it); slice 5 calls it from the webhook.
 4. **First deploy:** the Budget stack first, then the OIDC deploy roles, then `TokenKeeper` and `DemoReceiver` with everything built so far. Fix what real IAM, Scheduler and SQS wiring turn up. Ends with a deployed connect and sync.
 5. **Revocation webhook:** `github-webhook` λ, tested locally with recorded deliveries, then live in `demo` with the instant flip to `needs_reauth`.
 6. **Observability:** metrics, dashboard, alarms (each forced once), runbook.

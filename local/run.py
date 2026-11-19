@@ -3,8 +3,12 @@
     uv run python -m local.run
 
 - Receiver: http://localhost:8000 (status page, webhook endpoint, passcode connect)
-- Token Keeper: http://localhost:8001 (``/connect``, ``/callback``), plus a thread that
-  drains the delivery queue into the deliverer, as Lambda's SQS trigger would.
+- Token Keeper: http://localhost:8001 (``/connect``, ``/callback``), plus threads that
+  drain the sync queue into the worker and the delivery queue into the deliverer, as
+  Lambda's SQS triggers would, and one that runs the planner every 30 seconds in place
+  of EventBridge Scheduler.
+- Local controls: http://127.0.0.1:8002 (``POST /plan``, ``POST /expire``; see
+  ``local/control.py``). ``/expire`` forces a real refresh on the next sync.
 - AWS calls go to moto (DynamoDB, SQS, KMS, SSM) via AWS_ENDPOINT_URL, so handler code
   has no local-only branches. GitHub is the real one, through Dan's GitHub App.
 - Dev secrets are generated into .env.local (gitignored) on first run. The GitHub App's
@@ -21,6 +25,7 @@ import json
 import os
 import secrets
 import socket
+import threading
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -37,6 +42,8 @@ ENV_FILE = ROOT / ".env.local"
 RECEIVER_TABLE = "receiver-local"
 TOKEN_KEEPER_TABLE = "token-keeper-local"  # noqa: S105 (a table name)
 TOKEN_KEEPER_PORT = 8001
+CONTROL_PORT = 8002
+PLANNER_INTERVAL_SECONDS = 30
 GITHUB_KEYS = ("GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET")
 
 
@@ -77,18 +84,26 @@ class Running:
     receiver_url: str
     token_keeper_url: str | None
     stop: Callable[[], None]
+    control_url: str | None = None
 
 
 def _create_token_keeper_resources() -> dict[str, str]:
-    """The table, KMS key and delivery queue (with its DLQ), on moto."""
+    """The table (with the due index), KMS key, and both queues with their DLQs, on moto."""
     from token_keeper.handlers.deliverer import MAX_RECEIVES
-    from token_keeper.store import ATTRIBUTE_DEFINITIONS, KEY_SCHEMA, TTL_ATTRIBUTE
+    from token_keeper.handlers.worker import MAX_RECEIVES as SYNC_MAX_RECEIVES
+    from token_keeper.store import (
+        ATTRIBUTE_DEFINITIONS,
+        GLOBAL_SECONDARY_INDEXES,
+        KEY_SCHEMA,
+        TTL_ATTRIBUTE,
+    )
 
     dynamodb = boto3.client("dynamodb")
     dynamodb.create_table(
         TableName=TOKEN_KEEPER_TABLE,
         KeySchema=KEY_SCHEMA,  # type: ignore[arg-type]
         AttributeDefinitions=ATTRIBUTE_DEFINITIONS,  # type: ignore[arg-type]
+        GlobalSecondaryIndexes=GLOBAL_SECONDARY_INDEXES,  # type: ignore[arg-type]
         BillingMode="PAY_PER_REQUEST",
     )
     dynamodb.update_time_to_live(
@@ -98,30 +113,53 @@ def _create_token_keeper_resources() -> dict[str, str]:
     key_id = boto3.client("kms").create_key(Description="token-keeper-local")["KeyMetadata"][
         "KeyId"
     ]
-    sqs = boto3.client("sqs")
-    dlq_url = sqs.create_queue(QueueName="delivery-dlq-local")["QueueUrl"]
-    dlq_arn = sqs.get_queue_attributes(QueueUrl=dlq_url, AttributeNames=["QueueArn"])["Attributes"][
-        "QueueArn"
-    ]
-    queue_url = sqs.create_queue(
-        QueueName="delivery-local",
-        Attributes={
-            "RedrivePolicy": json.dumps(
-                {"deadLetterTargetArn": dlq_arn, "maxReceiveCount": str(MAX_RECEIVES)}
-            )
-        },
-    )["QueueUrl"]
     return {
         "TOKEN_KEEPER_TABLE": TOKEN_KEEPER_TABLE,
         "KMS_KEY_ID": key_id,
-        "DELIVERY_QUEUE_URL": queue_url,
+        "DELIVERY_QUEUE_URL": _queue_with_dlq("delivery-local", MAX_RECEIVES),
+        "SYNC_QUEUE_URL": _queue_with_dlq("sync-local", SYNC_MAX_RECEIVES),
     }
+
+
+def _queue_with_dlq(name: str, max_receives: int) -> str:
+    sqs = boto3.client("sqs")
+    dlq_url = sqs.create_queue(QueueName=f"{name}-dlq")["QueueUrl"]
+    dlq_arn = sqs.get_queue_attributes(QueueUrl=dlq_url, AttributeNames=["QueueArn"])["Attributes"][
+        "QueueArn"
+    ]
+    return sqs.create_queue(
+        QueueName=name,
+        Attributes={
+            "RedrivePolicy": json.dumps(
+                {"deadLetterTargetArn": dlq_arn, "maxReceiveCount": str(max_receives)}
+            )
+        },
+    )["QueueUrl"]
+
+
+def _plan_every(seconds: float) -> threading.Event:
+    """Run the planner on a timer, as EventBridge Scheduler does every 15 minutes."""
+    from token_keeper.handlers import planner
+
+    stop = threading.Event()
+
+    def loop() -> None:
+        while not stop.wait(seconds):
+            try:
+                planner.handler({}, None)
+            except Exception as exc:  # keep the runner alive; the planner logs details
+                print(f"  planner error: {type(exc).__name__}")
+
+    threading.Thread(target=loop, daemon=True).start()
+    return stop
 
 
 def start(
     receiver_port: int = 8000,
     env_file: Path = ENV_FILE,
     token_keeper_port: int = TOKEN_KEEPER_PORT,
+    control_port: int = CONTROL_PORT,
+    planner_interval: float = PLANNER_INTERVAL_SECONDS,
 ) -> Running:
     """Start moto, the receiver and (with GitHub App credentials) Token Keeper.
 
@@ -171,14 +209,18 @@ def start(
                 "RECEIVER_URL": receiver_url,
             }
         )
-        from token_keeper.handlers import _shared, callback, connect, deliverer
+        from local.control import control_handler
+        from token_keeper.handlers import _shared, callback, connect, deliverer, worker
 
         _shared.reset()
         token_keeper = router(
             {("GET", "/connect"): connect.handler, ("GET", "/callback"): callback.handler}
         )
         servers.append(make_server(token_keeper, "127.0.0.1", token_keeper_port))
+        servers.append(make_server(control_handler(), "127.0.0.1", control_port))
+        drains.append(drain_in_thread(os.environ["SYNC_QUEUE_URL"], worker.handler))
         drains.append(drain_in_thread(os.environ["DELIVERY_QUEUE_URL"], deliverer.handler))
+        drains.append(_plan_every(planner_interval))
     for server in servers:
         serve_in_thread(server)
 
@@ -198,6 +240,7 @@ def start(
         receiver_url=receiver_url,
         token_keeper_url=token_keeper_url if with_token_keeper else None,
         stop=stop,
+        control_url=f"http://127.0.0.1:{control_port}" if with_token_keeper else None,
     )
 
 
@@ -209,6 +252,7 @@ def main() -> None:
     print(f"Receiver: {running.receiver_url}")
     if running.token_keeper_url:
         print(f"Token Keeper: {running.token_keeper_url}")
+        print(f"Local controls: http://127.0.0.1:{CONTROL_PORT} (POST /plan, POST /expire)")
         if os.environ["GITHUB_CLIENT_ID"].isdigit():
             # GitHub answers an unknown client_id with a bare 404 after sign-in.
             print(
@@ -222,8 +266,6 @@ def main() -> None:
         )
     print(f"Passcode and secrets: {ENV_FILE.name}   (Ctrl-C to stop)")
     try:
-        import threading
-
         threading.Event().wait()
     except KeyboardInterrupt:
         running.stop()

@@ -127,10 +127,13 @@ def test_sync_with_a_valid_token_makes_no_token_call(
     assert acc.events.calls.last.request.url.params["per_page"] == "10"
     snapshot = snapshot_of(acc.account_id)
     assert len(snapshot["recent_events"]) == 10
+    # Newest first, whatever order GitHub listed them in.
+    times = [e["created_at"] for e in snapshot["recent_events"]]
+    assert times == sorted(times, reverse=True)
     assert snapshot["recent_events"][0] == {
-        "type": "WatchEvent",
-        "repo": "octo-demo/repo-0",
-        "created_at": "2026-11-18T10:00:00Z",
+        "type": "PushEvent",
+        "repo": "octo-demo/repo-9",
+        "created_at": "2026-11-18T19:00:00Z",
     }
     item = account_item(acc.account_id)
     assert item["state"] == {"S": "active"}

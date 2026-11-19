@@ -225,7 +225,11 @@ def get_user(access_token: str, now: int = 0) -> GitHubUser:
 def get_public_events(
     login: str, access_token: str, now: int = 0, limit: int = 10
 ) -> list[dict[str, str]]:
-    """The user's last few public events (spec §5): public only, nothing private."""
+    """The user's last few public events (spec §5): public only, nothing private.
+
+    Newest first by ``created_at``: GitHub's feed is close to that order but not
+    exactly (the slice 3 browser check showed a push listed above a later one).
+    """
     response = _api_get(
         f"/users/{quote(login, safe='')}/events/public",
         access_token,
@@ -235,7 +239,7 @@ def get_public_events(
     )
     try:
         body = response.json()
-        return [
+        events = [
             {
                 "type": str(event["type"]),
                 "repo": str(event["repo"]["name"]),
@@ -243,5 +247,7 @@ def get_public_events(
             }
             for event in body[:limit]
         ]
+        # ISO 8601 UTC strings sort in time order.
+        return sorted(events, key=lambda e: e["created_at"], reverse=True)
     except (KeyError, TypeError, ValueError):
         raise GitHubError("events_response_malformed") from None

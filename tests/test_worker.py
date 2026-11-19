@@ -36,7 +36,7 @@ from tests.tk_flow import (
 from token_keeper import sync
 from token_keeper.contract.events import parse_event
 from token_keeper.handlers import deliverer, worker
-from token_keeper.store import Store
+from token_keeper.store import Account, EncryptedTokens, LeasedAccount, LeaseLost, Store
 
 TOKEN_FIELDS = {"access_token_ct", "refresh_token_ct", "access_expires_at", "refresh_expires_at"}
 
@@ -339,7 +339,9 @@ def test_no_token_call_starts_late_in_the_lease(
 ) -> None:
     _near_expiry(acc)
     start = int(time.time())
-    clock = iter([start, start + 45])  # the lease, then the refresh check 45 s later
+    # The lease is taken at `start`; every later clock read (run()'s, then the refresh
+    # check's) is 45 s on, leaving 15 s of lease: under the 20 s guard.
+    clock = iter([start, start + 45])
     monkeypatch.setattr(worker, "now", lambda: next(clock, start + 45))
     run_worker(acc.account_id)
     assert acc.token.call_count == 0
@@ -356,3 +358,43 @@ def test_an_unexpected_error_fails_only_that_record(acc: Connected) -> None:
     result = worker.handler({"Records": [bad, sync_record(acc.account_id, "m-ok")]}, None)
     assert result == {"batchItemFailures": [{"itemIdentifier": "m-bad"}]}
     assert acc.user.call_count == 1
+
+
+# finish_sync: only a failed lease condition is a lost lease (PR 4 review) ----------
+
+
+class _CancellingClient:
+    def __init__(self, first_reason: str) -> None:
+        self.first_reason = first_reason
+
+    def transact_write_items(self, **kwargs: object) -> None:
+        from botocore.exceptions import ClientError
+
+        raise ClientError(
+            {
+                "Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+                "CancellationReasons": [{"Code": self.first_reason}, {"Code": "None"}],
+            },
+            "TransactWriteItems",
+        )
+
+
+def _leased() -> LeasedAccount:
+    account = Account("acc_X", "demo", "u_demo", 1234, "octo-demo", "active", None, 2)
+    tokens = EncryptedTokens(b"a", b"r", 0, 0)
+    return LeasedAccount(account, tokens, "wrk_X", 0, 0)
+
+
+@pytest.mark.parametrize("reason", ["TransactionConflict", "ThrottlingError"])
+def test_a_cancel_for_another_reason_is_not_a_lost_lease(reason: str) -> None:
+    from botocore.exceptions import ClientError
+
+    store = Store(TK_TABLE, client=_CancellingClient(reason))  # type: ignore[arg-type]
+    with pytest.raises(ClientError):
+        store.finish_sync(_leased(), login="octo-demo", snapshot={}, next_due_at=0)
+
+
+def test_a_failed_lease_condition_is_a_lost_lease() -> None:
+    store = Store(TK_TABLE, client=_CancellingClient("ConditionalCheckFailed"))  # type: ignore[arg-type]
+    with pytest.raises(LeaseLost):
+        store.finish_sync(_leased(), login="octo-demo", snapshot={}, next_due_at=0)

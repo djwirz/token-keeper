@@ -179,6 +179,14 @@ def _needs_reauth_set(reason: str) -> tuple[str, dict[str, Any]]:
     )
 
 
+def _lease_condition_failed(exc: ClientError) -> bool:
+    """True if a transaction was cancelled because its first item's condition failed."""
+    if exc.response["Error"]["Code"] != "TransactionCanceledException":
+        return False
+    reasons = exc.response.get("CancellationReasons") or [{}]
+    return reasons[0].get("Code") == "ConditionalCheckFailed"
+
+
 class Store:
     def __init__(self, table_name: str, client: DynamoDBClient | None = None) -> None:
         self._table = table_name
@@ -559,8 +567,10 @@ class Store:
                 ]
             )
         except ClientError as exc:
-            if exc.response["Error"]["Code"] == "TransactionCanceledException":
+            if _lease_condition_failed(exc):
                 raise LeaseLost from None
+            # A throttle or a transaction conflict isn't a lost lease: fail the message
+            # so SQS retries it, rather than dropping the sync (PR 4 review).
             raise
 
     def finish_transient(self, leased: LeasedAccount, *, error_code: str, next_due_at: int) -> None:

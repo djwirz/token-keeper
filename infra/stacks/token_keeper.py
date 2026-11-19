@@ -12,8 +12,10 @@ One role per Lambda, granted exactly what its handler does (spec §9, ADR 0003):
 - callback: ``kms:Encrypt`` and ``kms:Decrypt``, the item writes its transaction uses,
   and ``SendMessage`` to the delivery queue.
 - deliverer: ``Query`` (account + snapshot) and the queue; no KMS at all.
-- planner: ``Query`` on the ``due`` index only, ``UpdateItem`` (the push) and
-  ``SendMessage`` to the sync queue; no KMS.
+- planner: ``Query`` on the ``due`` index only, ``UpdateItem`` and ``SendMessage``
+  to the sync queue; no KMS. Its code only updates ``next_due_at`` and ``version``,
+  but the role allows ``UpdateItem`` on the whole table until a ``dynamodb:Attributes``
+  condition can be proven in a deploy (slice 4).
 - worker: ``kms:Encrypt`` and ``kms:Decrypt`` (the only other role with Decrypt),
   ``UpdateItem``/``PutItem`` (lease, tokens, snapshot) and ``SendMessage`` to the
   delivery queue.
@@ -70,7 +72,8 @@ WORKER_TIMEOUT_SECONDS = 40
 WORKER_BATCH_SIZE = 1
 PLANNER_TIMEOUT_SECONDS = 60
 PLANNER_RATE_MINUTES = 15
-assert WORKER_TIMEOUT_SECONDS < LEASE_SECONDS, "a worker must not outlive its lease"
+if WORKER_TIMEOUT_SECONDS >= LEASE_SECONDS:  # not an assert: python -O strips those
+    raise ValueError("a worker must not outlive its lease (ADR 0015)")
 
 
 class TokenKeeperStack(Stack):

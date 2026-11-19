@@ -21,6 +21,7 @@ tries, moves it to the sync DLQ. GitHub trouble is recorded in the account inste
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from typing import Any
 
@@ -96,9 +97,11 @@ class _Sync:
         self.refreshed = True
         # GitHub has already killed the old pair: store the new one before anything else.
         # If this write fails, the pair is lost (spec §7 "Lost rotation").
-        store().store_refreshed_tokens(
-            self.leased, encrypt_tokens(self.leased.account.account_id, pair)
-        )
+        encrypted = encrypt_tokens(self.leased.account.account_id, pair)
+        store().store_refreshed_tokens(self.leased, encrypted)
+        # From here on, the only tokens this sync holds are the ones just stored: the old
+        # refresh token is dead at GitHub (PR 4 review: don't leave it in reach).
+        self.leased = dataclasses.replace(self.leased, tokens=encrypted)
         self.logger.info("refresh.succeeded")
         return pair.access_token
 

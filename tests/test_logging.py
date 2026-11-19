@@ -97,17 +97,24 @@ def test_whole_flow_logs_no_tokens(
                 200, json=token_body(ROTATED_ACCESS_TOKEN, ROTATED_REFRESH_TOKEN)
             )
         )
+        # Each callback queued a sync. The first hits the 401 and retries; the second
+        # runs on the rotated pair. (The first version of this test gave the second
+        # sync no response, so it crashed with sync.error and the test still passed;
+        # the fresh-eyes review of PR 4 caught it.)
         user_route.side_effect = [
             httpx.Response(401, json={}),
             httpx.Response(200, json=user_body()),
+            httpx.Response(200, json=user_body()),
         ]
-        drain_once(tk_env.sync_queue_url, worker.handler, wait_seconds=0)
+        assert drain_once(tk_env.sync_queue_url, worker.handler, wait_seconds=0) == 2
         drain(tk_env.queue_url)
 
     out = capsys.readouterr()
     emitted = out.out + out.err
     assert "callback.connected" in emitted and "delivery.succeeded" in emitted
-    assert "refresh.succeeded" in emitted and "sync.succeeded" in emitted
+    assert emitted.count('"message":"refresh.succeeded"') == 1
+    assert emitted.count('"message":"sync.succeeded"') == 2
+    assert '"sync.error"' not in emitted and '"message":"sync.error"' not in emitted
     # Third-party DEBUG output really is in the capture, KMS bodies included.
     assert '"name":"botocore' in emitted and "Plaintext" in emitted
     assert "ghu_" not in emitted and "ghr_" not in emitted

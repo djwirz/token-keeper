@@ -42,6 +42,9 @@ def expire_access_tokens(table: str, now: int) -> int:
         dynamodb.update_item(
             TableName=table,
             Key={"PK": item["PK"], "SK": item["SK"]},
+            # Local test harness only: unlike every real writer (spec §4), it doesn't
+            # bump version. It's a shortcut for the live rotation check, not a writer
+            # the lease rules need to account for.
             UpdateExpression="SET access_expires_at = :now, next_due_at = :now",
             ExpressionAttributeValues={":now": {"N": str(now)}},
         )

@@ -13,7 +13,6 @@ from collections.abc import Iterator
 from dataclasses import fields
 from urllib.parse import parse_qs
 
-import boto3
 import httpx
 import pytest
 import respx
@@ -38,8 +37,6 @@ from tests.tk_flow import (
     snapshot_of,
     stored_tokens,
 )
-from token_keeper import crypto
-from token_keeper.handlers import _shared
 from token_keeper.store import Account, EncryptedTokens, LeasedAccount, Store
 
 THIRD_ACCESS = "ghu_" + "FakeAccessToken3333NotReal3333333333"
@@ -93,30 +90,41 @@ def test_two_workers_race_and_only_one_refreshes(
 
 
 def test_stale_read_still_refreshes_with_the_current_token(
-    setup: tuple[str, respx.Route, respx.Route],
+    setup: tuple[str, respx.Route, respx.Route], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Worker B starts first, but A rotates the pair just before B's lease write.
+
+    Anything B read before its lease (a pre-read, a cached item) holds the original
+    pair, which A's rotation has killed. B must refresh with A's rotated token, which
+    only the lease write's response carries. The fresh-eyes review of PR 4 showed the
+    first version of this test ran A and B one after the other and gave B nothing
+    stale to misuse: a worker that pre-read its tokens still passed.
+    """
     account_id, token, _ = setup
-    # Worker B read the account before A's refresh: it holds the original pair.
-    stale = boto3.client("dynamodb").get_item(
-        TableName=TK_TABLE,
-        Key={"PK": {"S": f"ACCOUNT#{account_id}"}, "SK": {"S": "META"}},
-        ConsistentRead=True,
-    )["Item"]
-    stale_refresh = _shared.crypto().decrypt(
-        bytes(stale["refresh_token_ct"]["B"]), crypto.account_context(account_id)
-    )
-    assert stale_refresh == REFRESH_TOKEN
+    real_take_lease = Store.take_lease
+    a_ran = False
 
-    # A refreshes and finishes. GitHub gives a short-lived access token this time, so
-    # B will need to refresh too.
-    short = token_body(ROTATED_ACCESS_TOKEN, ROTATED_REFRESH_TOKEN) | {"expires_in": 300}
-    token.mock(return_value=httpx.Response(200, json=short))
-    run_worker(account_id)
-    assert stored_tokens(account_id) == (ROTATED_ACCESS_TOKEN, ROTATED_REFRESH_TOKEN)
+    def a_runs_just_before_b_leases(
+        self: Store, account: str, owner: str, now: int
+    ) -> LeasedAccount | None:
+        nonlocal a_ran
+        if not a_ran:
+            a_ran = True
+            # A refreshes and finishes. GitHub gives a short-lived access token this
+            # time, so B will need to refresh too.
+            short = token_body(ROTATED_ACCESS_TOKEN, ROTATED_REFRESH_TOKEN) | {"expires_in": 300}
+            token.mock(return_value=httpx.Response(200, json=short))
+            run_worker(account_id)
+            assert stored_tokens(account_id) == (ROTATED_ACCESS_TOKEN, ROTATED_REFRESH_TOKEN)
+            token.mock(
+                return_value=httpx.Response(200, json=token_body(THIRD_ACCESS, THIRD_REFRESH))
+            )
+        return real_take_lease(self, account, owner, int(time.time()))
 
-    # Now B takes the lease. It must refresh with A's rotated token, not what it read.
-    token.mock(return_value=httpx.Response(200, json=token_body(THIRD_ACCESS, THIRD_REFRESH)))
-    run_worker(account_id)
+    monkeypatch.setattr(Store, "take_lease", a_runs_just_before_b_leases)
+    run_worker(account_id)  # B: everything before its lease write saw the original pair
+
+    assert a_ran
     assert token.call_count == 2
     sent = [parse_qs(call.request.content.decode())["refresh_token"] for call in token.calls]
     assert sent == [[REFRESH_TOKEN], [ROTATED_REFRESH_TOKEN]]

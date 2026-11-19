@@ -35,7 +35,9 @@ from token_keeper.store import Account
 if TYPE_CHECKING:
     from mypy_boto3_sqs import SQSClient
 
-TIMEOUT_SECONDS = 5.0
+# 5 s per phase, but only 2 s to connect: one worst-case POST stays well inside the
+# Lambda's 15 s timeout (one message per invocation; see infra/stacks/token_keeper.py).
+TIMEOUT = httpx.Timeout(5.0, connect=2.0)
 FIRST_BACKOFF_SECONDS = 30
 MAX_BACKOFF_SECONDS = 2 * 60 * 60
 # 30 s doubling to a 2 h cap, then 2 h apart: attempt 20 lands about a day after the first.
@@ -53,7 +55,7 @@ def _sqs() -> SQSClient:
 
 @cache
 def _http() -> httpx.Client:
-    return httpx.Client(timeout=TIMEOUT_SECONDS, headers={"user-agent": "token-keeper"})
+    return httpx.Client(timeout=TIMEOUT, headers={"user-agent": "token-keeper"})
 
 
 def build_event(

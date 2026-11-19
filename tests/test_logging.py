@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from collections.abc import Iterator
@@ -19,6 +20,14 @@ from token_keeper import log
 def test_scrub_replaces_every_github_token_prefix() -> None:
     for prefix in ("ghu_", "ghr_", "ghp_", "gho_", "ghs_"):
         assert log.scrub(f"before {prefix}abc123_XYZ after") == f"before {log.REDACTED} after"
+
+
+def test_scrub_replaces_base64_tokens() -> None:
+    # As botocore logs a KMS body at DEBUG: the plaintext token, base64-encoded.
+    for token in (ACCESS_TOKEN, REFRESH_TOKEN, "ghp_" + "x", "gho_" + "x", "ghs_" + "x"):
+        encoded = base64.b64encode(token.encode()).decode()
+        body = f'{{"KeyId": "k", "Plaintext": "{encoded}"}}'
+        assert log.scrub(body) == f'{{"KeyId": "k", "Plaintext": "{log.REDACTED}"}}'
 
 
 def test_formatter_scrubs_message_extra_keys_and_tracebacks(
@@ -40,14 +49,22 @@ def test_formatter_scrubs_message_extra_keys_and_tracebacks(
 
 @pytest.fixture
 def everything_logged() -> Iterator[None]:
-    """Turn every logger up to DEBUG for the flow test, so nothing is filtered out."""
-    root = logging.getLogger()
-    previous = root.level
-    root.setLevel(logging.DEBUG)
-    log.get_logger().setLevel(logging.DEBUG)
+    """Turn every logger up to DEBUG for the flow test, so nothing is filtered out.
+
+    That includes botocore, httpx and httpcore, which log request and response bodies
+    at DEBUG. ``log.get_logger()`` pins them to WARNING, so setting the root logger's
+    level alone would leave them silent (the first version of this test did that).
+    """
+    log.get_logger()  # copy the scrubbing config onto third-party loggers first
+    loggers = [logging.getLogger()] + [
+        lg for lg in logging.root.manager.loggerDict.values() if isinstance(lg, logging.Logger)
+    ]
+    previous = {lg: lg.level for lg in loggers}
+    for lg in loggers:
+        lg.setLevel(logging.DEBUG)
     yield
-    root.setLevel(previous)
-    log.get_logger().setLevel(logging.INFO)
+    for lg, level in previous.items():
+        lg.setLevel(level)
 
 
 @pytest.mark.usefixtures("everything_logged")
@@ -67,7 +84,11 @@ def test_whole_flow_logs_no_tokens(
     out = capsys.readouterr()
     emitted = out.out + out.err
     assert "callback.connected" in emitted and "delivery.succeeded" in emitted
+    # Third-party DEBUG output really is in the capture, KMS bodies included.
+    assert '"name":"botocore' in emitted and "Plaintext" in emitted
     assert "ghu_" not in emitted and "ghr_" not in emitted
+    for token in (ACCESS_TOKEN, REFRESH_TOKEN):
+        assert base64.b64encode(token.encode()).decode()[:12] not in emitted
     # caplog sees records before formatting, so it also proves no code logs a token
     # in the first place (the scrubber is only the backstop).
     raw = "\n".join(f"{r.getMessage()} {r.__dict__}" for r in caplog.records)

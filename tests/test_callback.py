@@ -36,6 +36,7 @@ from tests.tk_flow import (
 )
 from token_keeper import crypto
 from token_keeper.handlers import _shared, callback
+from token_keeper.store import Store
 
 pytestmark = pytest.mark.usefixtures("tk_env")
 
@@ -238,6 +239,43 @@ def test_reconnect_with_another_github_account_moves_the_link(gh: respx.MockRout
     assert ("GHUSER#1234", "META") not in items
     assert items[("GHUSER#5678", "META")]["account_id"] == {"S": account_id}
     assert items[(f"ACCOUNT#{account_id}", "META")]["login"] == {"S": "other-octo"}
+
+
+def test_racing_first_connects_end_as_one_account(
+    gh: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two first connects for one user: the slower one loses the write and reconnects.
+
+    The account exists, but this callback read "no user link" before the other one
+    committed. Its create transaction must fail on the user link, re-read, and become
+    a takeover of the winner's account (spec §4, ADR 0011), with its tokens encrypted
+    for that account.
+    """
+    mock_github(gh)
+    assert _result(connect_and_callback()) == "connected"
+    (account_id,) = _account_ids()
+
+    # The losing callback read before the winner committed: no user link, no GitHub
+    # link. Both reads are stale once, then real.
+    reads: list[str | None] = []
+    real_user, real_github = Store.account_for_user, Store.account_for_github_user
+
+    def stale_user(self: Store, app_id: str, external_user_id: str) -> str | None:
+        found = real_user(self, app_id, external_user_id) if reads else None
+        reads.append(found)
+        return found
+
+    def stale_github(self: Store, github_user_id: int) -> str | None:
+        return real_github(self, github_user_id) if len(reads) > 1 else None
+
+    monkeypatch.setattr(Store, "account_for_user", stale_user)
+    monkeypatch.setattr(Store, "account_for_github_user", stale_github)
+    assert _result(connect_and_callback()) == "connected"
+
+    assert reads == [None, account_id]  # one stale read, a lost write, then the retry
+    assert _account_ids() == [account_id]
+    account = _items()[(f"ACCOUNT#{account_id}", "META")]
+    assert account["version"] == {"N": "2"}
 
 
 def test_github_account_linked_to_another_user_is_already_linked(

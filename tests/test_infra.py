@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +13,9 @@ from aws_cdk.assertions import Match, Template
 
 from infra.stacks.budget import BudgetStack
 from infra.stacks.demo_receiver import SECRET_PARAMS, DemoReceiverStack
+from infra.stacks.shared import CONNECT_URL_PARAM, GITHUB_CLIENT_ID_PARAM, RECEIVER_URL_PARAM
+from infra.stacks.token_keeper import DELIVERER_BATCH_SIZE, TokenKeeperStack
 from infra.stacks.token_keeper import SECRET_PARAMS as TK_SECRET_PARAMS
-from infra.stacks.token_keeper import TokenKeeperStack
 from receiver.store import KEY_SCHEMA
 from token_keeper.handlers.deliverer import MAX_RECEIVES
 from token_keeper.store import ATTRIBUTE_DEFINITIONS as TK_ATTRIBUTE_DEFINITIONS
@@ -38,7 +40,6 @@ def receiver(tmp_path_factory: pytest.TempPathFactory) -> Template:
         app,
         "DemoReceiver",
         code=lambda_.Code.from_asset(str(code_dir)),
-        token_keeper_connect_url="https://token-keeper.invalid/connect",
         env=ENV,
     )
     return Template.from_stack(stack)
@@ -163,7 +164,7 @@ def test_lambda_permissions_are_exactly_what_the_handler_needs(receiver: Templat
     expected = {("dynamodb:PutItem", table), ("dynamodb:Scan", table)} | {
         (action, f"arn:${{AWS::Partition}}:ssm:{ENV.region}:{ENV.account}:parameter{name}")
         for action in ssm_actions
-        for name in SECRET_PARAMS.values()
+        for name in [*SECRET_PARAMS.values(), CONNECT_URL_PARAM]
     }
     assert _grants(receiver) == expected
 
@@ -180,8 +181,6 @@ def token_keeper(tmp_path_factory: pytest.TempPathFactory) -> Template:
         app,
         "TokenKeeper",
         code=lambda_.Code.from_asset(str(code_dir)),
-        receiver_url="https://receiver.invalid/",
-        github_client_id="Iv23-test",
         env=ENV,
     )
     return Template.from_stack(stack)
@@ -265,7 +264,9 @@ def test_each_role_has_exactly_what_its_handler_needs(token_keeper: Template) ->
 
     expected = {
         "token_keeper.handlers.connect.handler": {("kms:Encrypt", key), ("dynamodb:PutItem", table)}
-        | ssm(TK_SECRET_PARAMS["CONNECT_LINK_SECRET_PARAM"]),
+        | ssm(TK_SECRET_PARAMS["CONNECT_LINK_SECRET_PARAM"])
+        | ssm(GITHUB_CLIENT_ID_PARAM)
+        | ssm(RECEIVER_URL_PARAM),
         "token_keeper.handlers.callback.handler": {
             ("kms:Encrypt", key),
             ("kms:Decrypt", key),
@@ -273,12 +274,12 @@ def test_each_role_has_exactly_what_its_handler_needs(token_keeper: Template) ->
             ("dynamodb:DeleteItem", table),
             ("dynamodb:PutItem", table),
             ("dynamodb:UpdateItem", table),
-            ("dynamodb:ConditionCheckItem", table),
             ("sqs:SendMessage", queue),
             ("sqs:GetQueueAttributes", queue),
             ("sqs:GetQueueUrl", queue),
         }
-        | ssm(TK_SECRET_PARAMS["GITHUB_CLIENT_SECRET_PARAM"]),
+        | ssm(TK_SECRET_PARAMS["GITHUB_CLIENT_SECRET_PARAM"])
+        | ssm(GITHUB_CLIENT_ID_PARAM),
         "token_keeper.handlers.deliverer.handler": {
             ("dynamodb:Query", table),
             ("sqs:ReceiveMessage", queue),
@@ -287,7 +288,8 @@ def test_each_role_has_exactly_what_its_handler_needs(token_keeper: Template) ->
             ("sqs:GetQueueAttributes", queue),
             ("sqs:GetQueueUrl", queue),
         }
-        | ssm(TK_SECRET_PARAMS["WEBHOOK_SECRET_PARAM"]),
+        | ssm(TK_SECRET_PARAMS["WEBHOOK_SECRET_PARAM"])
+        | ssm(RECEIVER_URL_PARAM),
     }
     grants = _grants_by_role(token_keeper)
     assert set(grants) == {_role_of(token_keeper, h) for h in expected}
@@ -335,4 +337,35 @@ def test_token_keeper_api_routes_and_throttle(token_keeper: Template) -> None:
                 {"ThrottlingRateLimit": 5, "ThrottlingBurstLimit": 10}
             )
         },
+    )
+
+
+def test_deliverer_timeout_covers_its_whole_batch(token_keeper: Template) -> None:
+    # A batch that outlives the Lambda is killed before any backoff is set, and every
+    # message burns a receive per visibility timeout (PR 3 review). Allow 10 s per
+    # message: one POST is at most 2 s to connect plus 5 s to read.
+    (mapping,) = token_keeper.find_resources("AWS::Lambda::EventSourceMapping").values()
+    batch = mapping["Properties"]["BatchSize"]
+    assert batch == DELIVERER_BATCH_SIZE == 1
+    functions = token_keeper.find_resources(
+        "AWS::Lambda::Function",
+        {"Properties": {"Handler": "token_keeper.handlers.deliverer.handler"}},
+    )
+    (deliverer_fn,) = functions.values()
+    assert deliverer_fn["Properties"]["Timeout"] >= batch * 10
+
+
+def test_stacks_share_urls_through_ssm_not_exports(
+    receiver: Template, token_keeper: Template
+) -> None:
+    # ADR 0014: no CloudFormation export or import between the stacks.
+    for template in (receiver, token_keeper):
+        rendered = json.dumps(template.to_json())
+        assert "Fn::ImportValue" not in rendered
+        assert "Export" not in json.dumps(template.to_json().get("Outputs", {}))
+    receiver.has_resource_properties(
+        "AWS::SSM::Parameter", {"Name": RECEIVER_URL_PARAM, "Type": "String"}
+    )
+    token_keeper.has_resource_properties(
+        "AWS::SSM::Parameter", {"Name": CONNECT_URL_PARAM, "Type": "String"}
     )

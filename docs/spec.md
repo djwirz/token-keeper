@@ -189,7 +189,7 @@ Body: always the **full current state**, read when the event is sent (not when i
 | Reconnect or revocation during a sync | Worker's final write fails (`lease_owner` changed) | The worker discards what it holds and logs `lease_lost`. The takeover write already holds the correct state. |
 | Lost rotation | GitHub rotated the pair but we never stored it: a timeout or lost response from the token endpoint, or a crash before the write | → `needs_reauth` on the next attempt. GitHub documents no grace period, so re-auth is the only recovery. Accepted as a residual risk; a lost response is the likeliest cause. |
 | Receiver down | Deliverer non-2xx | Retries for about a day, then the DLQ. State in Token Keeper is unaffected. |
-| Poison message | The same message fails 5 times | DLQ, plus an alarm. |
+| Poison message | The same message keeps failing | Retried for about a day like any failed delivery, then the DLQ, plus an alarm. |
 | Malformed or forged connect link, callback or GitHub webhook | Signature or state check | Rejected. A metric is incremented. Nothing stored. |
 
 ## 8. Observability
@@ -209,7 +209,7 @@ Powertools for AWS Lambda (Python): structured JSON logs, EMF metrics and X-Ray 
 
 ## 9. Security
 
-- **Tokens at rest:** field-level KMS encryption with a customer-managed key, using `account_id` as encryption context. Only the `callback` and `worker` roles have `kms:Decrypt`. DynamoDB encryption sits underneath ([ADR 0003](adr/0003-field-level-kms-encryption.md)).
+- **Tokens at rest:** field-level KMS encryption with a customer-managed key, using `account_id` as encryption context. Within the stack, only the `callback` and `worker` roles have `kms:Decrypt`. The key keeps CDK's default key policy, so the account's administrators can still decrypt; a key policy that denies them is left out on purpose at demo scale. DynamoDB encryption sits underneath ([ADR 0003](adr/0003-field-level-kms-encryption.md)).
 - **Tokens in transit and in use:** held only in Lambda memory. Never logged, never put in an SQS message (messages carry `account_id` only), never sent in a webhook.
 - **Secrets** (GitHub App client secret, GitHub App webhook secret, connect-link secret, outbound webhook signing secret, demo passcode): SSM Parameter Store SecureString, read at cold start, never in the repo, CI logs or PR text. Outbound webhook secret rotation uses Standard Webhooks multi-signature.
 - **OAuth:** a random 32-byte `state` (single-use, TTL'd) plus PKCE S256 ([ADR 0007](adr/0007-signed-connect-links-state-pkce.md)). `return_to` is checked against an exact-match allow-list, so there are no open redirects.

@@ -7,20 +7,24 @@ environment locally or SSM in AWS (``token_keeper.ssm``).
 Environment:
 - ``TOKEN_KEEPER_TABLE``, ``KMS_KEY_ID``, ``DELIVERY_QUEUE_URL``
 - ``TOKEN_KEEPER_PUBLIC_URL``: this service's base URL; GitHub returns to ``<it>/callback``
-- ``GITHUB_CLIENT_ID`` (not a secret)
-- ``ALLOWED_RETURN_TO``: JSON ``{"<app_id>": ["<exact return_to URL>", …]}``
-- ``RECEIVER_WEBHOOK_URL``: the main app's webhook endpoint (one app in v1)
-- secrets: ``GITHUB_CLIENT_SECRET``, ``CONNECT_LINK_SECRET``, ``WEBHOOK_SECRET``
+- From the environment or SSM (``…_PARAM``, ADR 0014):
+  - ``GITHUB_CLIENT_ID`` (not a secret)
+  - ``RECEIVER_URL``: the one registered main app's base URL (spec §2: one app, from
+    config). It is the only allowed ``return_to``, and its webhook endpoint is
+    ``<it>webhooks/token-keeper``.
+  - secrets: ``GITHUB_CLIENT_SECRET``, ``CONNECT_LINK_SECRET``, ``WEBHOOK_SECRET``
 """
 
 from __future__ import annotations
 
-import json
 import os
 from functools import cache, cached_property
 
 from token_keeper.contract import webhooks
-from token_keeper.ssm import secret
+from token_keeper.ssm import env_or_ssm
+
+APP_ID = "demo"
+WEBHOOK_PATH = "webhooks/token-keeper"
 
 
 class Settings:
@@ -42,30 +46,33 @@ class Settings:
 
     @cached_property
     def github_client_id(self) -> str:
-        return os.environ["GITHUB_CLIENT_ID"]
+        return env_or_ssm("GITHUB_CLIENT_ID")
 
     @cached_property
     def github_client_secret(self) -> str:
-        return secret("GITHUB_CLIENT_SECRET")
+        return env_or_ssm("GITHUB_CLIENT_SECRET")
 
     @cached_property
     def connect_link_secret(self) -> str:
-        return secret("CONNECT_LINK_SECRET")
+        return env_or_ssm("CONNECT_LINK_SECRET")
 
     @cached_property
     def webhook_secret(self) -> str:
-        value = secret("WEBHOOK_SECRET")
+        value = env_or_ssm("WEBHOOK_SECRET")
         webhooks.check_secret(value)
         return value
 
     @cached_property
+    def receiver_url(self) -> str:
+        return env_or_ssm("RECEIVER_URL")
+
+    @cached_property
     def allowed_return_to(self) -> dict[str, frozenset[str]]:
-        raw = json.loads(os.environ["ALLOWED_RETURN_TO"])
-        return {app: frozenset(urls) for app, urls in raw.items()}
+        return {APP_ID: frozenset({self.receiver_url})}
 
     @cached_property
     def receiver_webhook_url(self) -> str:
-        return os.environ["RECEIVER_WEBHOOK_URL"]
+        return self.receiver_url + WEBHOOK_PATH
 
 
 @cache

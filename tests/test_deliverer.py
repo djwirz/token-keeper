@@ -10,6 +10,7 @@ import httpx
 import pytest
 import respx
 
+from local.queues import to_record
 from receiver.handler import handler as receiver_handler
 from tests.conftest import RECEIVER_WEBHOOK_URL, WEBHOOK_SECRET, TokenKeeperEnv, http_event
 from tests.github_fakes import mock_github
@@ -115,18 +116,32 @@ def test_failure_is_retried_with_backoff(
 
 
 def test_one_bad_record_does_not_fail_the_batch(
-    router: respx.MockRouter, tk_env: TokenKeeperEnv
+    router: respx.MockRouter, tk_env: TokenKeeperEnv, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Batches are one message in AWS (batch_size=1), but the handler must still isolate
+    # records. Each record is its own SQS message, so the backoff lands on the right one.
     router.post(RECEIVER_WEBHOOK_URL).mock(return_value=httpx.Response(204))
     connect_and_callback()
-    (good,) = boto3.client("sqs").receive_message(
-        QueueUrl=tk_env.queue_url, AttributeNames=["All"], MessageAttributeNames=["All"]
+    sqs = boto3.client("sqs")
+    sqs.send_message(QueueUrl=tk_env.queue_url, MessageBody="not json")
+    messages = sqs.receive_message(
+        QueueUrl=tk_env.queue_url,
+        MaxNumberOfMessages=10,
+        AttributeNames=["All"],
+        MessageAttributeNames=["All"],
     )["Messages"]
-    from local.queues import to_record
+    assert len(messages) == 2
+    good, bad = sorted(messages, key=lambda m: m["Body"] == "not json")
 
-    bad = {**to_record(good), "messageId": "bad", "body": "not json"}
-    result = deliverer.handler({"Records": [to_record(good), bad]}, None)
-    assert result == {"batchItemFailures": [{"itemIdentifier": "bad"}]}
+    calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(
+        deliverer._sqs(),
+        "change_message_visibility",
+        lambda **kw: calls.append((kw["ReceiptHandle"], kw["VisibilityTimeout"])),
+    )
+    result = deliverer.handler({"Records": [to_record(good), to_record(bad)]}, None)
+    assert result == {"batchItemFailures": [{"itemIdentifier": bad["MessageId"]}]}
+    assert calls == [(bad["ReceiptHandle"], deliverer.FIRST_BACKOFF_SECONDS)]
 
 
 def test_missing_account_is_dropped(router: respx.MockRouter) -> None:

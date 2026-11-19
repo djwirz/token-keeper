@@ -1,8 +1,9 @@
-"""Secrets from the environment locally, or from SSM Parameter Store in AWS.
+"""Settings from the environment locally, or from SSM Parameter Store in AWS.
 
-Locally, each secret is an environment variable (the local runner loads ``.env.local``).
-In AWS the variable is absent and ``<NAME>_PARAM`` names a SecureString parameter
-instead, read once per cold start by whoever caches the config.
+Locally, each value is an environment variable (the local runner loads ``.env.local``).
+In AWS the variable is absent and ``<NAME>_PARAM`` names a parameter instead: a
+SecureString for secrets, a plain String for the URLs the two stacks publish for each
+other (ADR 0014). Read once per cold start by whoever caches the config.
 """
 
 from __future__ import annotations
@@ -12,7 +13,7 @@ import os
 import boto3
 
 
-def secret(name: str) -> str:
+def env_or_ssm(name: str) -> str:
     direct = os.environ.get(name)
     if direct:
         return direct

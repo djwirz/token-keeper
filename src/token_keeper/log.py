@@ -23,7 +23,10 @@ from aws_lambda_powertools.logging.formatter import LambdaPowertoolsFormatter
 from aws_lambda_powertools.logging.utils import copy_config_to_registered_loggers
 
 SERVICE = "token-keeper"
-TOKEN_PATTERN = re.compile(r"gh[pousr]_[A-Za-z0-9_]*")
+# The raw token, and its base64 form at the start of an encoded value: botocore at DEBUG
+# logs KMS request and response bodies, where the token is the base64 ``Plaintext``
+# (``ghu_`` encodes to ``Z2h1X``, ``ghr_`` to ``Z2hyX``, and so on).
+TOKEN_PATTERN = re.compile(r"gh[pousr]_[A-Za-z0-9_]*|Z2h[1ywvz]X[A-Za-z0-9+/=]*")
 REDACTED = "[redacted-token]"
 
 

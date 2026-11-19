@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -117,8 +116,7 @@ def tk_env(receiver_env: None, monkeypatch: pytest.MonkeyPatch) -> Iterator[Toke
         "TOKEN_KEEPER_PUBLIC_URL": TK_PUBLIC_URL,
         "GITHUB_CLIENT_ID": GITHUB_CLIENT_ID,
         "GITHUB_CLIENT_SECRET": GITHUB_CLIENT_SECRET,
-        "ALLOWED_RETURN_TO": json.dumps({"demo": [PUBLIC_URL]}),
-        "RECEIVER_WEBHOOK_URL": RECEIVER_WEBHOOK_URL,
+        "RECEIVER_URL": PUBLIC_URL,
     }
     for key, value in env.items():
         monkeypatch.setenv(key, value)

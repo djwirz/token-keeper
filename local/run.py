@@ -168,8 +168,7 @@ def start(
             {
                 **_create_token_keeper_resources(),
                 "TOKEN_KEEPER_PUBLIC_URL": token_keeper_url,
-                "ALLOWED_RETURN_TO": json.dumps({"demo": [receiver_url]}),
-                "RECEIVER_WEBHOOK_URL": f"{receiver_url}webhooks/token-keeper",
+                "RECEIVER_URL": receiver_url,
             }
         )
         from token_keeper.handlers import _shared, callback, connect, deliverer

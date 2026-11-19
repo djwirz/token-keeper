@@ -12,6 +12,13 @@ One role per Lambda, granted exactly what its handler does (spec §9, ADR 0003):
 - callback: ``kms:Encrypt`` and ``kms:Decrypt``, the item writes its transaction uses,
   and ``SendMessage`` to the delivery queue.
 - deliverer: ``Query`` (account + snapshot) and the queue; no KMS at all.
+
+It publishes its connect URL to SSM for the receiver and reads the receiver's URL and
+the GitHub client ID from SSM at cold start (ADR 0014): no cross-stack reference.
+
+The deliverer takes one message per invocation. Its 15 s timeout then always covers
+one worst-case POST (2 s connect + 5 s read + signing), so a slow receiver can't time
+out a whole batch and skip the backoff (PR 3 review).
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ from aws_cdk import aws_sqs as sqs
 from aws_cdk import aws_ssm as ssm
 from constructs import Construct
 
+from infra.stacks.shared import CONNECT_URL_PARAM, GITHUB_CLIENT_ID_PARAM, RECEIVER_URL_PARAM
 from token_keeper.handlers.deliverer import MAX_RECEIVES
 from token_keeper.store import TTL_ATTRIBUTE
 
@@ -41,6 +49,7 @@ SECRET_PARAMS = {
 }
 THROTTLE = {"rate": 5, "burst": 10}
 DELIVERER_TIMEOUT_SECONDS = 15
+DELIVERER_BATCH_SIZE = 1
 
 
 class TokenKeeperStack(Stack):
@@ -50,8 +59,6 @@ class TokenKeeperStack(Stack):
         construct_id: str,
         *,
         code: lambda_.Code,
-        receiver_url: str,
-        github_client_id: str,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -100,6 +107,13 @@ class TokenKeeperStack(Stack):
                 self, env_name, parameter_name=SECRET_PARAMS[env_name]
             )
 
+        receiver_url = ssm.StringParameter.from_string_parameter_name(
+            self, "ReceiverUrl", RECEIVER_URL_PARAM
+        )
+        github_client_id = ssm.StringParameter.from_string_parameter_name(
+            self, "GitHubClientId", GITHUB_CLIENT_ID_PARAM
+        )
+
         def function(
             name: str, module: str, timeout: int, environment: dict[str, str]
         ) -> lambda_.Function:
@@ -134,14 +148,16 @@ class TokenKeeperStack(Stack):
             {
                 "KMS_KEY_ID": key.key_arn,
                 "TOKEN_KEEPER_PUBLIC_URL": public_url,
-                "GITHUB_CLIENT_ID": github_client_id,
-                "ALLOWED_RETURN_TO": self.to_json_string({"demo": [receiver_url]}),
+                "GITHUB_CLIENT_ID_PARAM": GITHUB_CLIENT_ID_PARAM,
+                "RECEIVER_URL_PARAM": RECEIVER_URL_PARAM,
                 "CONNECT_LINK_SECRET_PARAM": SECRET_PARAMS["CONNECT_LINK_SECRET_PARAM"],
             },
         )
         key.grant(connect, "kms:Encrypt")
         table.grant(connect, "dynamodb:PutItem")
         secret_param("CONNECT_LINK_SECRET_PARAM").grant_read(connect)
+        github_client_id.grant_read(connect)
+        receiver_url.grant_read(connect)
 
         callback = function(
             "Callback",
@@ -150,7 +166,7 @@ class TokenKeeperStack(Stack):
             {
                 "KMS_KEY_ID": key.key_arn,
                 "TOKEN_KEEPER_PUBLIC_URL": public_url,
-                "GITHUB_CLIENT_ID": github_client_id,
+                "GITHUB_CLIENT_ID_PARAM": GITHUB_CLIENT_ID_PARAM,
                 "DELIVERY_QUEUE_URL": queue.queue_url,
                 "GITHUB_CLIENT_SECRET_PARAM": SECRET_PARAMS["GITHUB_CLIENT_SECRET_PARAM"],
             },
@@ -162,10 +178,10 @@ class TokenKeeperStack(Stack):
             "dynamodb:DeleteItem",
             "dynamodb:PutItem",
             "dynamodb:UpdateItem",
-            "dynamodb:ConditionCheckItem",
         )
         queue.grant_send_messages(callback)
         secret_param("GITHUB_CLIENT_SECRET_PARAM").grant_read(callback)
+        github_client_id.grant_read(callback)
 
         deliverer = function(
             "Deliverer",
@@ -173,14 +189,17 @@ class TokenKeeperStack(Stack):
             DELIVERER_TIMEOUT_SECONDS,
             {
                 "DELIVERY_QUEUE_URL": queue.queue_url,
-                "RECEIVER_WEBHOOK_URL": f"{receiver_url}webhooks/token-keeper",
+                "RECEIVER_URL_PARAM": RECEIVER_URL_PARAM,
                 "WEBHOOK_SECRET_PARAM": SECRET_PARAMS["WEBHOOK_SECRET_PARAM"],
             },
         )
         table.grant(deliverer, "dynamodb:Query")
         secret_param("WEBHOOK_SECRET_PARAM").grant_read(deliverer)
+        receiver_url.grant_read(deliverer)
         deliverer.add_event_source(
-            event_sources.SqsEventSource(queue, batch_size=10, report_batch_item_failures=True)
+            event_sources.SqsEventSource(
+                queue, batch_size=DELIVERER_BATCH_SIZE, report_batch_item_failures=True
+            )
         )
 
         for path, fn in (("/connect", connect), ("/callback", callback)):
@@ -190,5 +209,12 @@ class TokenKeeperStack(Stack):
                 integration=integrations.HttpLambdaIntegration(f"{fn.node.id}Integration", fn),
             )
 
+        ssm.StringParameter(
+            self,
+            "ConnectUrlParam",
+            parameter_name=CONNECT_URL_PARAM,
+            string_value=f"{public_url}/connect",
+            description="token-keeper: Token Keeper's /connect URL, read by the receiver",
+        )
         CfnOutput(self, "ConnectUrl", value=f"{public_url}/connect")
         CfnOutput(self, "CallbackUrl", value=f"{public_url}/callback")

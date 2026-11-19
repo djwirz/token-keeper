@@ -19,6 +19,7 @@ from tests.conftest import (
     http_event,
 )
 from tests.fixtures import sample_event
+from token_keeper import github
 from token_keeper.contract import connect_links, webhooks
 from token_keeper.contract.events import parse_event
 
@@ -150,6 +151,8 @@ def test_page_csp_allows_the_connect_redirect() -> None:
     )
     assert f"{location.scheme}://{location.netloc}" in form_action.split()
     assert "'self'" in form_action.split()
+    # ...and every later hop: Token Keeper's /connect redirects on to GitHub.
+    assert urlsplit(github.AUTHORIZE_URL).scheme + "://github.com" in form_action.split()
 
 
 def test_unreadable_body_is_400_not_500() -> None:

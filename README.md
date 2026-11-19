@@ -10,7 +10,7 @@ Needs [uv](https://docs.astral.sh/uv/) (it fetches Python 3.12 itself). No AWS a
 
 **One-time: a GitHub App** (spec §5). At GitHub → Settings → Developer settings → GitHub Apps → New:
 - Callback URL `http://localhost:8001/callback`; **Expire user authorization tokens** on; no permissions; webhook **Active** off for now.
-- Generate a client secret, then add both values to `.env.local` (gitignored, created on first run):
+- Generate a client secret, then add it and the **Client ID** (it starts with `Iv`; the numeric App ID won't work) to `.env.local` (gitignored, created on first run):
 
 ```
 GITHUB_CLIENT_ID=...

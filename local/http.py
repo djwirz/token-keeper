@@ -71,7 +71,9 @@ def make_server(handler: LambdaHandler, host: str, port: int) -> ThreadingHTTPSe
         do_POST = _dispatch
 
         def log_message(self, format: str, *args: Any) -> None:
-            print(f"  {self.command} {self.path} -> {args[1] if len(args) > 1 else ''}")
+            # Path only: query strings carry OAuth codes, state and connect-link signatures.
+            path = urlsplit(self.path).path
+            print(f"  {self.command} {path} -> {args[1] if len(args) > 1 else ''}")
 
     return ThreadingHTTPServer((host, port), Handler)
 

@@ -135,3 +135,12 @@ def test_connect_flow_end_to_end(runner_with_github: run.Running, tmp_path: Path
             time.sleep(0.2)
     assert "@octo-demo" in page
     assert "Octo Demo" in page
+
+
+def test_access_log_never_prints_query_strings(
+    runner: run.Running, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _page(runner.receiver_url + "?result=connected&code=secret-code-marker")
+    out = capsys.readouterr().out
+    assert "GET / ->" in out
+    assert "secret-code-marker" not in out

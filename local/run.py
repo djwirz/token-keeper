@@ -210,6 +210,12 @@ def main() -> None:
     print(f"Receiver: {running.receiver_url}")
     if running.token_keeper_url:
         print(f"Token Keeper: {running.token_keeper_url}")
+        if os.environ["GITHUB_CLIENT_ID"].isdigit():
+            # GitHub answers an unknown client_id with a bare 404 after sign-in.
+            print(
+                "Warning: GITHUB_CLIENT_ID is all digits, which is the GitHub App's App ID. "
+                "Use its Client ID (it starts with 'Iv')."
+            )
     else:
         print(
             "Token Keeper not started: add GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET from "

@@ -56,7 +56,9 @@ def get_logger() -> Logger:
         logger_formatter=ScrubbingFormatter(),
         stream=cast(IO[str], _CurrentStdout()),
     )
-    copy_config_to_registered_loggers(source_logger=logger)
+    # Third-party loggers (httpx, botocore) get the same scrubbing formatter, at WARNING:
+    # their INFO lines are per-request chatter.
+    copy_config_to_registered_loggers(source_logger=logger, log_level=logging.WARNING)
     return logger
 
 

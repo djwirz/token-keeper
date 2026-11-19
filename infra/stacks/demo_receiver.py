@@ -1,7 +1,10 @@
 """The demo receiver: one Lambda behind an HTTP API, a small table, SSM secrets.
 
 Receiver data is disposable, so its table is destroyed with the stack. (Token Keeper's
-own table and KMS key are RETAIN; that stack arrives in a later slice.)
+own table and KMS key are RETAIN.)
+
+It publishes its URL to SSM for Token Keeper and reads Token Keeper's connect URL from
+SSM at cold start (ADR 0014), so neither stack references the other.
 """
 
 from __future__ import annotations
@@ -16,6 +19,8 @@ from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_ssm as ssm
 from constructs import Construct
+
+from infra.stacks.shared import CONNECT_URL_PARAM, RECEIVER_URL_PARAM
 
 SSM_PREFIX = "/token-keeper/demo/receiver"
 SECRET_PARAMS = {
@@ -35,7 +40,6 @@ class DemoReceiverStack(Stack):
         construct_id: str,
         *,
         code: lambda_.Code,
-        token_keeper_connect_url: str,
         **kwargs: Any,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -89,7 +93,7 @@ class DemoReceiverStack(Stack):
             log_group=log_group,
             environment={
                 "RECEIVER_TABLE": table.table_name,
-                "TOKEN_KEEPER_CONNECT_URL": token_keeper_connect_url,
+                "TOKEN_KEEPER_CONNECT_URL_PARAM": CONNECT_URL_PARAM,
                 "RECEIVER_PUBLIC_URL": f"{api.api_endpoint}/",
                 **SECRET_PARAMS,
             },
@@ -103,6 +107,17 @@ class DemoReceiverStack(Stack):
             ssm.StringParameter.from_secure_string_parameter_attributes(
                 self, env_name, parameter_name=param_name
             ).grant_read(fn)
+
+        ssm.StringParameter.from_string_parameter_name(
+            self, "ConnectUrl", CONNECT_URL_PARAM
+        ).grant_read(fn)
+        ssm.StringParameter(
+            self,
+            "ReceiverUrlParam",
+            parameter_name=RECEIVER_URL_PARAM,
+            string_value=f"{api.api_endpoint}/",
+            description="token-keeper: the demo receiver's base URL, read by Token Keeper",
+        )
 
         integration = integrations.HttpLambdaIntegration("Integration", fn)
         for method, path in (

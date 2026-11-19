@@ -3,7 +3,7 @@
 A connector service that keeps third-party account connections healthy: it holds tokens, refreshes or re-verifies them on a schedule, and reports account state to a main app through one signed endpoint. First provider: GitHub. Use they/them for Dan.
 
 ## Status
-Building: slice 1 of 7 (local foundation), per `docs/spec.md` §12. Slices 1–3 are local only; nothing is deployed until slice 4.
+Building: slice 2 of 7 (connect → callback, locally), per `docs/spec.md` §12. Slices 1–3 are local only; nothing is deployed until slice 4.
 
 ## How we work
 - Pull requests only; never push to `main`. Merged PRs are the project's record.

@@ -90,12 +90,14 @@ Every change to an Account item is a conditional write that bumps `version`. The
 | Item | Key | Notable attributes |
 |---|---|---|
 | Account | `PK=ACCOUNT#<account_id>` `SK=META` | `app_id`, `external_user_id`, `github_user_id`, `login`, `state`, `state_reason`, `version`, `next_due_at`, `access_token_ct`, `refresh_token_ct`, `access_expires_at`, `refresh_expires_at`, `lease_until`, `lease_owner`, `last_error_code`, `consecutive_failures` |
-| Snapshot | `PK=ACCOUNT#<id>` `SK=SNAPSHOT` | profile fields, last ~10 public events, `fetched_at` |
-| OAuth state | `PK=STATE#<random>` | `app_id`, `external_user_id`, `pkce_verifier_ct`, `return_to`, TTL of about 10 minutes |
-| User link | `PK=LINK#<app_id>#<external_user_id>` | `account_id` |
-| GitHub link | `PK=GHUSER#<github_user_id>` | `account_id` (used by revocation webhooks) |
+| Snapshot | `PK=ACCOUNT#<id>` `SK=SNAPSHOT` | `snapshot`: profile fields, last ~10 public events, `fetched_at` (one JSON string) |
+| OAuth state | `PK=STATE#<sha256 of state>` `SK=META` | `app_id`, `external_user_id`, `pkce_verifier_ct`, `return_to`, `correlation_id`, `ttl` of about 10 minutes |
+| User link | `PK=LINK#<app_id>#<external_user_id>` `SK=META` | `account_id` |
+| GitHub link | `PK=GHUSER#<github_user_id>` `SK=META` | `account_id` (used by revocation webhooks) |
 
-The callback writes Account, User link and GitHub link in one transaction. Identity rules are in [ADR 0011](adr/0011-account-identity-and-contract-states.md).
+Times are Numbers (epoch seconds) and `*_ct` fields are Binary. The state item is keyed by the state's hash, so someone who can read the table can't replay a live state. Layout and types: [ADR 0013](adr/0013-token-keeper-table-layout.md).
+
+The callback writes Account, User link, GitHub link and the profile-only Snapshot in one transaction. Identity rules are in [ADR 0011](adr/0011-account-identity-and-contract-states.md).
 
 GSI `due`: partition `state`, sort `next_due_at`. The planner queries only `active` with `next_due_at <= now`; `needs_reauth` accounts have no `next_due_at`, so they drop out of the index. One partition per state is a known scaling limit far beyond demo scale, noted for the case study rather than fixed.
 
@@ -187,7 +189,7 @@ Body: always the **full current state**, read when the event is sent (not when i
 | Reconnect or revocation during a sync | Worker's final write fails (`lease_owner` changed) | The worker discards what it holds and logs `lease_lost`. The takeover write already holds the correct state. |
 | Lost rotation | GitHub rotated the pair but we never stored it: a timeout or lost response from the token endpoint, or a crash before the write | → `needs_reauth` on the next attempt. GitHub documents no grace period, so re-auth is the only recovery. Accepted as a residual risk; a lost response is the likeliest cause. |
 | Receiver down | Deliverer non-2xx | Retries for about a day, then the DLQ. State in Token Keeper is unaffected. |
-| Poison message | The same message fails 5 times | DLQ, plus an alarm. |
+| Poison message | The same message keeps failing | Retried for about a day like any failed delivery, then the DLQ, plus an alarm. |
 | Malformed or forged connect link, callback or GitHub webhook | Signature or state check | Rejected. A metric is incremented. Nothing stored. |
 
 ## 8. Observability
@@ -207,7 +209,7 @@ Powertools for AWS Lambda (Python): structured JSON logs, EMF metrics and X-Ray 
 
 ## 9. Security
 
-- **Tokens at rest:** field-level KMS encryption with a customer-managed key, using `account_id` as encryption context. Only the `callback` and `worker` roles have `kms:Decrypt`. DynamoDB encryption sits underneath ([ADR 0003](adr/0003-field-level-kms-encryption.md)).
+- **Tokens at rest:** field-level KMS encryption with a customer-managed key, using `account_id` as encryption context. Within the stack, only the `callback` and `worker` roles have `kms:Decrypt`. The key keeps CDK's default key policy, so the account's administrators can still decrypt; a key policy that denies them is left out on purpose at demo scale. DynamoDB encryption sits underneath ([ADR 0003](adr/0003-field-level-kms-encryption.md)).
 - **Tokens in transit and in use:** held only in Lambda memory. Never logged, never put in an SQS message (messages carry `account_id` only), never sent in a webhook.
 - **Secrets** (GitHub App client secret, GitHub App webhook secret, connect-link secret, outbound webhook signing secret, demo passcode): SSM Parameter Store SecureString, read at cold start, never in the repo, CI logs or PR text. Outbound webhook secret rotation uses Standard Webhooks multi-signature.
 - **OAuth:** a random 32-byte `state` (single-use, TTL'd) plus PKCE S256 ([ADR 0007](adr/0007-signed-connect-links-state-pkce.md)). `return_to` is checked against an exact-match allow-list, so there are no open redirects.
@@ -256,7 +258,7 @@ Stretch (not required): an admin "force re-verify" and a second provider.
 Slices 1–3 are local only. Each one also adds the CDK code for what it builds, checked by `cdk synth` and assertion tests in CI, so the first deploy ships infrastructure that has already been reviewed.
 
 1. **Local foundation:** repo skeleton, CI (lint, type, test, gitleaks, `cdk synth`), the webhook contract library (sign and verify with test vectors), connect-link signing with test vectors, the demo receiver running locally (verify, store, status page, passcode-gated connect), and the local runner.
-2. **Connect → callback, locally:** GitHub App (localhost callback), signed links, state and PKCE, encrypted token storage on moto, Powertools logger with the token scrubber and its test. `account.connected` delivered to the local receiver through the deliverer queue.
+2. **Connect → callback, locally:** GitHub App (localhost callback), signed links, state and PKCE, encrypted token storage on moto, Powertools logger with the token scrubber and its test. `account.connected` delivered to the local receiver through the deliverer queue. The callback's immediate sync enqueue (§4) waits for the sync queue in slice 3. Until then, the callback sets `next_due_at` to now, so the planner picks up a new account on its first run anyway.
 3. **Sync and refresh, locally:** planner → queue → worker with snapshot, refresh under lease, the state machine and failure handling, and the three concurrency tests. Real refresh-token rotations against Dan's GitHub account.
 4. **First deploy:** the Budget stack first, then the OIDC deploy roles, then `TokenKeeper` and `DemoReceiver` with everything built so far. Fix what real IAM, Scheduler and SQS wiring turn up. Ends with a deployed connect and sync.
 5. **Revocation webhook:** `github-webhook` λ, tested locally with recorded deliveries, then live in `demo` with the instant flip to `needs_reauth`.

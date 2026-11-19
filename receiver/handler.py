@@ -59,15 +59,22 @@ def _origin(url: str) -> str:
     return f"{parts.scheme}://{parts.netloc}"
 
 
+# Where Token Keeper's /connect sends the browser next: the provider's authorize page.
+PROVIDER_AUTHORIZE_ORIGINS = ("https://github.com",)
+
+
 def page_csp(token_keeper_connect_url: str) -> str:
     """The status page's CSP.
 
-    ``form-action`` also governs where a form submission may be redirected, and the
-    passcode form is answered with a redirect to Token Keeper, so its origin is allowed.
+    ``form-action`` governs every hop of the redirect chain that follows a form
+    submission, not just the first. The passcode form redirects to Token Keeper, which
+    redirects to GitHub, so both origins are allowed. (Slice 1 allowed only the first
+    hop; a real browser blocked the second.)
     """
+    allowed = " ".join(("'self'", _origin(token_keeper_connect_url), *PROVIDER_AUTHORIZE_ORIGINS))
     return (
         "default-src 'none'; img-src https:; style-src 'unsafe-inline'; "
-        f"form-action 'self' {_origin(token_keeper_connect_url)}; "
+        f"form-action {allowed}; "
         "frame-ancestors 'none'; base-uri 'none'"
     )
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -11,11 +12,18 @@ import pytest
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk.assertions import Match, Template
 
+from infra.app import ENV
 from infra.stacks.budget import BudgetStack
+from infra.stacks.ci_roles import (
+    DEPLOY_SUBJECT,
+    DIFF_SUBJECT,
+    CiRolesStack,
+)
 from infra.stacks.demo_receiver import SECRET_PARAMS, DemoReceiverStack
 from infra.stacks.shared import CONNECT_URL_PARAM, GITHUB_CLIENT_ID_PARAM, RECEIVER_URL_PARAM
 from infra.stacks.token_keeper import (
     DELIVERER_BATCH_SIZE,
+    PLANNER_ATTRIBUTES,
     WORKER_BATCH_SIZE,
     WORKER_TIMEOUT_SECONDS,
     TokenKeeperStack,
@@ -28,7 +36,9 @@ from token_keeper.store import ATTRIBUTE_DEFINITIONS as TK_ATTRIBUTE_DEFINITIONS
 from token_keeper.store import GLOBAL_SECONDARY_INDEXES, LEASE_SECONDS, TTL_ATTRIBUTE
 from token_keeper.store import KEY_SCHEMA as TK_KEY_SCHEMA
 
-ENV = cdk.Environment(account="111111111111", region="us-east-1")
+# The app's own environment: region only, so templates hold ${AWS::AccountId} rather than
+# a literal account (ADR 0016).
+ACCOUNT = "${AWS::AccountId}"
 
 
 @pytest.fixture(scope="module")
@@ -56,7 +66,12 @@ def test_budget_is_five_dollars_with_two_email_alerts(budget: Template) -> None:
         "AWS::Budgets::Budget",
         {
             "Budget": Match.object_like(
-                {"BudgetLimit": {"Amount": 5, "Unit": "USD"}, "TimeUnit": "MONTHLY"}
+                {
+                    "BudgetLimit": {"Amount": 5, "Unit": "USD"},
+                    "TimeUnit": "MONTHLY",
+                    # Before credits, or a credit-funded account never alerts.
+                    "CostTypes": {"IncludeCredit": False},
+                }
             ),
             "NotificationsWithSubscribers": [
                 {
@@ -168,7 +183,7 @@ def test_lambda_permissions_are_exactly_what_the_handler_needs(receiver: Templat
         "ssm:GetParameters",
     )
     expected = {("dynamodb:PutItem", table), ("dynamodb:Scan", table)} | {
-        (action, f"arn:${{AWS::Partition}}:ssm:{ENV.region}:{ENV.account}:parameter{name}")
+        (action, f"arn:${{AWS::Partition}}:ssm:{ENV.region}:{ACCOUNT}:parameter{name}")
         for action in ssm_actions
         for name in [*SECRET_PARAMS.values(), CONNECT_URL_PARAM]
     }
@@ -274,7 +289,7 @@ def test_each_role_has_exactly_what_its_handler_needs(token_keeper: Template) ->
     }
 
     def ssm(name: str) -> set[tuple[str, str]]:
-        arn = f"arn:${{AWS::Partition}}:ssm:{ENV.region}:{ENV.account}:parameter{name}"
+        arn = f"arn:${{AWS::Partition}}:ssm:{ENV.region}:{ACCOUNT}:parameter{name}"
         return {
             (action, arn)
             for action in (
@@ -447,3 +462,184 @@ def test_stacks_share_urls_through_ssm_not_exports(
     token_keeper.has_resource_properties(
         "AWS::SSM::Parameter", {"Name": CONNECT_URL_PARAM, "Type": "String"}
     )
+
+
+# IAM conditions (ADR 0017) ------------------------------------------------------
+
+
+def _leading_keys(prefix: str) -> dict[str, Any]:
+    return {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": [f"{prefix}*"]}}
+
+
+def _table_statements(template: Template) -> dict[str, list[tuple[frozenset[str], str, Any]]]:
+    """Each role's DynamoDB statements as (actions, resource, condition)."""
+    by_role: dict[str, list[tuple[frozenset[str], str, Any]]] = {}
+    for policy in template.find_resources("AWS::IAM::Policy").values():
+        (role,) = policy["Properties"]["Roles"]
+        for statement in policy["Properties"]["PolicyDocument"]["Statement"]:
+            actions = statement["Action"]
+            actions = [actions] if isinstance(actions, str) else actions
+            if not all(a.startswith("dynamodb:") for a in actions):
+                continue
+            (resource,) = (
+                statement["Resource"]
+                if isinstance(statement["Resource"], list)
+                else [statement["Resource"]]
+            )
+            by_role.setdefault(role["Ref"], []).append(
+                (frozenset(actions), _flatten(resource), statement.get("Condition"))
+            )
+    return by_role
+
+
+def test_table_grants_carry_exactly_their_key_and_attribute_conditions(
+    token_keeper: Template,
+) -> None:
+    # An exact match per role: dropping or loosening a condition fails here.
+    (table_id,) = token_keeper.find_resources("AWS::DynamoDB::Table")
+    table = f"${{{table_id}.Arn}}"
+    expected: dict[str, list[tuple[frozenset[str], str, Any]]] = {
+        "connect": [(frozenset({"dynamodb:PutItem"}), table, _leading_keys("STATE#"))],
+        # Writes all four key prefixes, so a LeadingKeys condition would exclude nothing.
+        "callback": [
+            (
+                frozenset(
+                    {
+                        "dynamodb:GetItem",
+                        "dynamodb:DeleteItem",
+                        "dynamodb:PutItem",
+                        "dynamodb:UpdateItem",
+                    }
+                ),
+                table,
+                None,
+            )
+        ],
+        "deliverer": [(frozenset({"dynamodb:Query"}), table, _leading_keys("ACCOUNT#"))],
+        "planner": [
+            # On the index the leading key is `state`, so no LeadingKeys here.
+            (frozenset({"dynamodb:Query"}), f"{table}/index/due", None),
+            (
+                frozenset({"dynamodb:UpdateItem"}),
+                table,
+                {
+                    **_leading_keys("ACCOUNT#"),
+                    "ForAllValues:StringEquals": {"dynamodb:Attributes": list(PLANNER_ATTRIBUTES)},
+                    "StringEqualsIfExists": {"dynamodb:ReturnValues": "NONE"},
+                },
+            ),
+        ],
+        "worker": [
+            (
+                frozenset({"dynamodb:UpdateItem", "dynamodb:PutItem"}),
+                table,
+                _leading_keys("ACCOUNT#"),
+            )
+        ],
+    }
+    statements = _table_statements(token_keeper)
+    for handler, want in expected.items():
+        got = statements[_role_of(token_keeper, f"token_keeper.handlers.{handler}.handler")]
+        assert sorted(got, key=repr) == sorted(want, key=repr), handler
+
+
+def test_planner_attribute_list_covers_exactly_what_push_due_names() -> None:
+    # The IAM list (dynamodb:Attributes) must match the code: a missing name breaks the
+    # planner in AWS (and moto wouldn't notice), and an extra one widens the grant.
+    from unittest.mock import MagicMock
+
+    from token_keeper.store import Store
+
+    client = MagicMock()
+    Store("t", client=client).push_due("acc_x", now=100, until=200)
+    ((), call) = client.update_item.call_args
+    names = set(call["Key"]) | set(call.get("ExpressionAttributeNames", {}).values())
+    for expression in (call["UpdateExpression"], call.get("ConditionExpression", "")):
+        names |= set(re.findall(r"(?<![:#\w])([A-Za-z_]\w*)", expression))
+    names -= {"SET", "REMOVE", "AND", "OR", "NOT", "attribute_exists", "attribute_not_exists"}
+    assert names == set(PLANNER_ATTRIBUTES)
+    assert "ReturnValues" not in call or call["ReturnValues"] == "NONE"
+
+
+# CI roles and account-free templates (ADR 0016) --------------------------------
+
+
+@pytest.fixture(scope="module")
+def ci_roles() -> Template:
+    return Template.from_stack(CiRolesStack(cdk.App(), "CiRoles", env=ENV))
+
+
+def _bootstrap_role(kind: str) -> str:
+    return (
+        f"arn:${{AWS::Partition}}:iam::{ACCOUNT}:role/cdk-hnb659fds-{kind}-role-"
+        f"{ACCOUNT}-{ENV.region}"
+    )
+
+
+def test_ci_roles_trust_one_github_subject_each_and_only_assume_bootstrap_roles(
+    ci_roles: Template,
+) -> None:
+    (provider_id,) = ci_roles.find_resources("AWS::IAM::OIDCProvider")
+    ci_roles.has_resource_properties(
+        "AWS::IAM::OIDCProvider",
+        {
+            "Url": "https://token.actions.githubusercontent.com",
+            "ClientIdList": ["sts.amazonaws.com"],
+        },
+    )
+    roles = ci_roles.find_resources("AWS::IAM::Role")
+    trusted = {}
+    for logical, role in roles.items():
+        (statement,) = role["Properties"]["AssumeRolePolicyDocument"]["Statement"]
+        assert statement["Action"] == "sts:AssumeRoleWithWebIdentity"
+        assert statement["Principal"] == {"Federated": {"Fn::GetAtt": [provider_id, "Arn"]}}
+        assert statement["Condition"] == {
+            "StringEquals": {
+                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                "token.actions.githubusercontent.com:sub": statement["Condition"]["StringEquals"][
+                    "token.actions.githubusercontent.com:sub"
+                ],
+            }
+        }
+        trusted[logical.split("Role")[0]] = statement["Condition"]["StringEquals"][
+            "token.actions.githubusercontent.com:sub"
+        ]
+        assert role["Properties"]["MaxSessionDuration"] == 3600
+    assert trusted == {"Deploy": DEPLOY_SUBJECT, "Diff": DIFF_SUBJECT}
+    # GitHub's immutable subjects (owner and repo by name and ID), as the repo's
+    # actions/oidc/customization/sub reports them. The name-only form was what slice 4
+    # first deployed, and every assume failed: pinning our own constant proved nothing.
+    assert DEPLOY_SUBJECT == "repo:djwirz@15788618/token-keeper@1463349634:environment:demo"
+    assert DIFF_SUBJECT == "repo:djwirz@15788618/token-keeper@1463349634:pull_request"
+    grants = _grants_by_role(ci_roles)
+    by_name = {logical.split("Role")[0]: logical for logical in roles}
+    assert grants[by_name["Deploy"]] == {
+        ("sts:AssumeRole", _bootstrap_role(kind))
+        for kind in ("deploy", "file-publishing", "lookup")
+    }
+    assert grants[by_name["Diff"]] == {("sts:AssumeRole", _bootstrap_role("lookup"))}
+
+
+def test_budget_and_ci_roles_deploy_without_a_bootstrap() -> None:
+    # What the CLI reads is the cloud assembly's manifest, not the template: it must
+    # name no role to assume and need no bootstrap stack, or the budget can't go first.
+    # (A template-only version of this test passed with BootstraplessSynthesizer, whose
+    # first real deploy then failed trying to assume the bootstrap deploy role.)
+    app = cdk.App()
+    BudgetStack(app, "Budget", email="ci@example.invalid", env=ENV)
+    CiRolesStack(app, "CiRoles", env=ENV)
+    assembly = app.synth()
+    for name in ("Budget", "CiRoles"):
+        stack = assembly.get_stack_by_name(name)
+        assert stack.assume_role_arn is None, name
+        assert stack.cloud_formation_execution_role_arn is None, name
+        assert stack.requires_bootstrap_stack_version is None, name
+        assert "BootstrapVersion" not in stack.template.get("Parameters", {}), name
+        assert stack.assets == [], name
+
+
+def test_no_template_holds_an_account_id(
+    budget: Template, ci_roles: Template, receiver: Template, token_keeper: Template
+) -> None:
+    for template in (budget, ci_roles, receiver, token_keeper):
+        assert not re.search(r"\b\d{12}\b", json.dumps(template.to_json()))

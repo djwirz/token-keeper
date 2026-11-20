@@ -1,0 +1,48 @@
+name: Deploy
+
+# cdk deploy to the one environment, demo (spec §9, §10, ADR 0016). The job runs in the
+# `demo` GitHub environment: it waits for Dan's approval, only `main` may use it, and
+# its OIDC subject (repo:…:environment:demo) is the only one DeployRole trusts.
+# Budget and CiRoles are deployed by hand and never from here.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # One deploy at a time; never cancel one halfway through a CloudFormation update.
+  group: deploy-demo
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: cdk deploy (demo)
+    runs-on: ubuntu-latest
+    environment: demo
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write # the OIDC token for the DeployRole
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: uv sync --locked
+      # The PR's checks ran on the merge result already; this is a cheap second look at
+      # exactly what is about to ship.
+      - run: uv run pytest -q
+      - run: scripts/build_lambda.sh
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+      - run: npx cdk deploy DemoReceiver TokenKeeper --require-approval never --progress events

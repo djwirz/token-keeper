@@ -25,6 +25,7 @@ dev = [
     "constructs>=10.4",
     "pytest-timeout>=2.3",
     "respx>=0.23.1",
+    "botocore[crt]>=1.44.6",
 ]
 
 [build-system]
@@ -49,7 +50,7 @@ ignore = ["S101"]  # assert is fine in tests
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src", "receiver", "local", "infra", "tests"]
+files = ["src", "receiver", "local", "infra", "tests", "scripts"]
 strict = true
 mypy_path = "src"
 explicit_package_bases = true

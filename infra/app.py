@@ -1,7 +1,14 @@
-"""CDK app. Synth only until slice 4 (spec §12).
+"""CDK app: Budget, CiRoles, DemoReceiver and TokenKeeper (spec §10, ADR 0016).
 
 Environment:
-- BUDGET_EMAIL (required): where budget alerts go. Never committed.
+- BUDGET_EMAIL (optional): where budget alerts go. Never committed, never in GitHub.
+  The Budget stack exists only when it's set: Dan deploys it by hand, and CI's diff
+  and deploy leave it out.
+
+The stacks are environment-agnostic apart from the region: the account comes from the
+credentials at deploy time, so no account ID is written into a template, a diff or a
+PR. CI deploys only DemoReceiver and TokenKeeper; Budget and CiRoles are deployed by
+hand, once (docs/deploy.md).
 
 The stacks find each other's URLs (and the GitHub client ID) through SSM parameters
 at runtime, not through CloudFormation exports, so they deploy in any order (ADR 0014).
@@ -19,26 +26,27 @@ import aws_cdk as cdk
 from aws_cdk import aws_lambda as lambda_
 
 from infra.stacks.budget import BudgetStack
+from infra.stacks.ci_roles import CiRolesStack
 from infra.stacks.demo_receiver import DemoReceiverStack
 from infra.stacks.token_keeper import TokenKeeperStack
 
 ROOT = Path(__file__).resolve().parent.parent
 LAMBDA_BUILD = ROOT / "build" / "lambda"
+REGION = "us-east-1"
+# No account: it comes from the credentials at deploy time (ADR 0016).
+ENV = cdk.Environment(region=REGION)
 
 
 def main() -> None:
-    email = os.environ.get("BUDGET_EMAIL")
-    if not email:
-        sys.exit("Set BUDGET_EMAIL (budget alerts go there).")
     if not (LAMBDA_BUILD / "token_keeper" / "handlers" / "callback.py").exists():
         sys.exit("Lambda build missing: run scripts/build_lambda.sh first.")
 
     app = cdk.App()
-    env = cdk.Environment(
-        account=os.environ.get("CDK_DEFAULT_ACCOUNT"),
-        region=os.environ.get("CDK_DEFAULT_REGION", "us-east-1"),
-    )
-    BudgetStack(app, "Budget", email=email, env=env)
+    env = ENV
+    email = os.environ.get("BUDGET_EMAIL")
+    if email:
+        BudgetStack(app, "Budget", email=email, env=env)
+    CiRolesStack(app, "CiRoles", env=env)
     DemoReceiverStack(
         app,
         "DemoReceiver",

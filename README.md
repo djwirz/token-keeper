@@ -39,7 +39,7 @@ uv run python -m local.send_event --version 2 --state needs_reauth --reason revo
 uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run pytest
 ```
 
-CDK synth (nothing is deployed before slice 4; needs Node 22+):
+CDK synth (needs Node 22+; `Budget` is only synthesized when `BUDGET_EMAIL` is set):
 
 ```bash
 npm ci
@@ -47,14 +47,19 @@ scripts/build_lambda.sh
 BUDGET_EMAIL=you@example.com npx cdk synth
 ```
 
+## Deploy
+
+One environment, `demo`. PRs get a `cdk diff` comment through a read-only OIDC role, and merges to `main` deploy `DemoReceiver` and `TokenKeeper` after approval in the GitHub `demo` environment. `Budget` and `CiRoles` are deployed by hand. First-deploy order, CI setup and operator steps: [docs/deploy.md](docs/deploy.md).
+
 ## Layout
 
 | Path | What |
 |---|---|
 | `src/token_keeper/contract/` | The contract a main app uses: webhook signing, connect links, event schema |
-| `src/token_keeper/handlers/` | Token Keeper's Lambdas: `connect`, `callback`, `deliverer` |
+| `src/token_keeper/handlers/` | Token Keeper's Lambdas: `connect`, `callback`, `planner`, `worker`, `deliverer` |
 | `src/token_keeper/` | Store (DynamoDB), KMS, GitHub client, token-scrubbing logger |
 | `receiver/` | The demo receiver (the stand-in main app) |
 | `local/` | Local runner and synthetic event sender |
-| `infra/` | CDK app: `Budget`, `DemoReceiver` and `TokenKeeper` stacks |
+| `infra/` | CDK app: `Budget`, `CiRoles`, `DemoReceiver` and `TokenKeeper` stacks |
+| `scripts/` | Lambda build, demo secrets, IAM proof |
 | `tests/vectors/` | Test vectors from independent sources |

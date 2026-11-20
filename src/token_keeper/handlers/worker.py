@@ -92,8 +92,9 @@ class _Sync:
                 now=current,
             )
         except github.GitHubError as exc:
-            if isinstance(exc, github.RefreshRejected):
-                # Only a rejection counts: transient errors don't alarm (ADR 0019).
+            if isinstance(exc, github.RefreshRejected | github.CredentialsRejected):
+                # Only a rejection counts, of the refresh token or of our own client
+                # credentials: an outage doesn't alarm (ADR 0019).
                 metrics.count(metrics.REFRESH_FAILED)
             self.logger.warning("refresh.failed", extra={"reason": exc.reason})
             raise

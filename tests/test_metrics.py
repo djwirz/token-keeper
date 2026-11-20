@@ -350,3 +350,20 @@ def test_an_ignored_event_counts_nothing(acc: str, capsys: pytest.CaptureFixture
 
 def test_metric_names_are_unique_and_include_every_count() -> None:
     assert len(set(metrics.ALL)) == len(metrics.ALL) == 11
+
+
+@pytest.mark.parametrize("code", ["incorrect_client_credentials", "unauthorized_client"])
+def test_rejected_client_credentials_are_refresh_failed_but_stay_active(
+    acc: str, token_route: respx.Route, capsys: pytest.CaptureFixture[str], code: str
+) -> None:
+    # PR 9 review: a bad client secret fails every refresh. It's our configuration, not
+    # GitHub being down, so it alarms; the account itself stays active and backs off.
+    from tests.tk_flow import account_item
+
+    _near_expiry(acc)
+    token_route.mock(return_value=httpx.Response(200, json={"error": code}))
+    run_worker(acc)
+    assert emitted(capsys).counts == Counter({metrics.REFRESH_FAILED: 1, metrics.SYNC_FAILED: 1})
+    item = account_item(acc)
+    assert item["state"] == {"S": "active"}
+    assert item["last_error_code"] == {"S": f"token_error:{code}"}

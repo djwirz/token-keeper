@@ -42,6 +42,19 @@ class RefreshRejected(GitHubError):
     """``bad_refresh_token``: the refresh token is dead (used, revoked or expired)."""
 
 
+class CredentialsRejected(GitHubError):
+    """GitHub refused our own client ID or secret: a configuration error on our side.
+
+    Still transient for the account (it stays ``active`` and backs off), since the
+    grant itself is fine. But it fails every refresh until fixed, so it counts as
+    ``RefreshFailed`` and alarms (ADR 0019, PR 9 review).
+    """
+
+
+# GitHub's token-endpoint codes for a bad client ID or secret.
+CREDENTIAL_ERRORS = frozenset({"incorrect_client_credentials", "unauthorized_client"})
+
+
 class Unauthorized(GitHubError):
     """A 401 from the API: the access token no longer works."""
 
@@ -128,6 +141,8 @@ def _token_pair(body: dict[str, Any], now: int) -> TokenPair:
         code = safe_code(body["error"])
         if code == "bad_refresh_token":
             raise RefreshRejected(f"token_error:{code}")
+        if code in CREDENTIAL_ERRORS:
+            raise CredentialsRejected(f"token_error:{code}")
         raise GitHubError(f"token_error:{code}")
     try:
         access = body["access_token"]

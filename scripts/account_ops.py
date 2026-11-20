@@ -32,7 +32,7 @@ import boto3
 
 from token_keeper import crypto, ids, sync
 from token_keeper.crypto import Crypto
-from token_keeper.store import EncryptedTokens, Identity, Store
+from token_keeper.store import EncryptedTokens, Identity, Store, WriteConflict
 
 REGION = "us-east-1"
 APP_ID = "demo"
@@ -148,7 +148,10 @@ def run(session: boto3.Session, args: argparse.Namespace, mask: Masker) -> None:
             print("sync message sent")
         return
 
-    deleted = store.delete_account(args.account_id)
+    try:
+        deleted = store.delete_account(args.account_id)
+    except WriteConflict:
+        sys.exit("the account changed while deleting it; nothing was deleted, run it again")
     if not deleted:
         print(f"no account {args.account_id}")
     for key in deleted:

@@ -11,8 +11,8 @@ Everything below assumes `AWS_PROFILE=token-keeper` (after `aws login --profile 
 Finding resources by their logical-ID prefix (`Worker`, `SyncDlq`, `WorkerLogs`…):
 
 ```bash
-res() { aws cloudformation describe-stack-resources --stack-name TokenKeeper --query "StackResources[?ResourceType=='$1' && starts_with(LogicalResourceId, '$2')].PhysicalResourceId" --output text; }
-logs() { aws logs filter-log-events --log-group-name "$(res AWS::Logs::LogGroup "$1Logs")" --start-time $(( ($(date +%s) - ${3:-3600}) * 1000 )) --filter-pattern "$2" --query 'events[].message' --output text; }
+res() { aws cloudformation list-stack-resources --stack-name TokenKeeper --query "StackResourceSummaries[?ResourceType=='$1' && starts_with(LogicalResourceId, '$2')].PhysicalResourceId" --output text; }
+logs() { aws logs filter-log-events --log-group-name "$(res AWS::Logs::LogGroup "$1Logs")" --start-time $(( ($(date +%s) - ${3:-3600}) * 1000 )) --filter-pattern "$2" --query 'events[].[message]' --output text; }
 ```
 
 `logs Worker '"sync.error"'` shows the last hour's matching worker lines. A third argument changes the window, in seconds.
@@ -53,19 +53,21 @@ The body is `{"account_id": …}` for a sync, or `{"account_id", "type", "webhoo
   aws sqs start-message-move-task --source-arn "$DLQ_ARN"
   aws sqs list-message-move-tasks --source-arn "$DLQ_ARN" --query 'Results[0].[Status, ApproximateNumberOfMessagesMoved]'
   ```
-- **Delete a poison message.** Use this for a message that can never succeed, such as a body that isn't JSON. Use the receipt handle from a fresh `receive-message`:
+- **Delete a poison message.** Use this for a message that can never succeed, such as a body that isn't JSON. Look at the body first, then delete it with the receipt handle from that same receive:
   ```bash
+  RECEIPT=$(aws sqs receive-message --queue-url "$(res AWS::SQS::Queue SyncDlq)" --visibility-timeout 60 --query 'Messages[0].ReceiptHandle' --output text)
   aws sqs delete-message --queue-url "$(res AWS::SQS::Queue SyncDlq)" --receipt-handle "$RECEIPT"
   ```
 
-The alarm goes back to OK, with an email, within about ten minutes of the DLQ emptying.
+The alarm goes back to OK, with an email, within about ten minutes of the DLQ emptying. Don't take that email as proof the DLQ is empty: SQS can stop reporting a queue nobody touches, and a quiet DLQ then reads as zero. Check with `get-queue-attributes` (above).
 
 ## Refresh failed
 
-**What it means.** GitHub rejected a refresh (`bad_refresh_token`) at least once in the last hour, and that account is now `needs_reauth` (`refresh_rejected`). Transient token-endpoint errors never fire this (ADR 0019). The likely causes:
+**What it means.** GitHub rejected a refresh at least once in the last hour. Either it rejected the refresh token (`bad_refresh_token`), and that account is usually now `needs_reauth` (`refresh_rejected`), or it rejected *our* client ID or secret (`incorrect_client_credentials`, `unauthorized_client`). Transient token-endpoint errors never fire this (ADR 0019). The likely causes:
+0. **Our client secret is wrong** (the log's `reason` is `token_error:incorrect_client_credentials` or `token_error:unauthorized_client`, usually on every account). Every refresh fails until it's fixed, but accounts stay `active` and keep their tokens. Fix the secret with `put_demo_secrets.py --overwrite` (docs/deploy.md) and force a cold start of the Worker. The next sync of each account then refreshes normally.
 1. **A lost rotation** (spec §7). GitHub rotated the pair, but the response or the write was lost. Look for `token_unreachable` or `sync.error` on the same account shortly before.
 2. **The rotation hazard** (spec §5). Two refreshes raced, or a stale token was used. The lease should make this impossible, so treat it as a bug.
-3. **The grant really is gone:** revoked, and the revocation webhook missed it.
+3. **The grant really is gone:** revoked, and the revocation webhook missed it, or hadn't landed yet. A worker that refreshes in the seconds after a user revokes gets `bad_refresh_token` before the webhook's takeover. That's benign: check `logs GitHubWebhook '"github_webhook.revoked"' 7200` for a revocation within the same minute. If the takeover won the race, the account ends `needs_reauth` with reason `revoked`, not `refresh_rejected`.
 
 **How to check.**
 
@@ -113,7 +115,7 @@ aws cloudformation detect-stack-drift --stack-name TokenKeeper
 aws cloudformation describe-stack-resource-drifts --stack-name TokenKeeper --stack-resource-drift-status-filters MODIFIED DELETED
 ```
 
-That should list nothing. If the schedule shows as `NOT_CHECKED` (CloudFormation's drift detection doesn't cover every resource type), compare `get-schedule` with the template instead: same expression, flexible window, target and retry policy, and `ENABLED`. The next run (within 15 minutes) logs `planner.enqueued`. Accounts that came due while it was off are all picked up on that run, since the due index has no window. The alarm clears within about half an hour.
+That should list nothing. If the schedule shows as `NOT_CHECKED` (CloudFormation's drift detection doesn't cover every resource type), compare `get-schedule` with the template instead: same expression, flexible window, target and retry policy, and `ENABLED`. The next run (within 15 minutes) logs `planner.enqueued`. Accounts that came due while it was off are all picked up on that run, since the due index has no window. The alarm clears within about fifteen minutes of that run: one period with an invocation breaks the three-of-three.
 
 ## Deleting an account's data on request
 
@@ -125,7 +127,7 @@ There's no disconnect API (spec §2). A user who wants their data gone asks, and
    ```bash
    uv run python scripts/account_ops.py --profile token-keeper delete acc_…
    ```
-   This deletes the Account, its Snapshot, the user link and the GitHub link, in one transaction. A link that has since moved to another account is left alone. It prints each key it deleted, and is harmless to run twice. A worker mid-sync can't bring anything back: its writes are conditional on its lease, which goes with the Account item. A delivery still queued finds no account and drops the message (`delivery.account_missing`).
+   This deletes the Account, its Snapshot, the user link and the GitHub link, in one transaction. A link that already points at another account is left alone. If the account changes while the script runs (a reconnect, a sync, a revocation), nothing is deleted and it says to run it again. It prints each key it deleted, and is harmless to run twice. A worker mid-sync can't bring anything back: its writes are conditional on its lease, which goes with the Account item. A delivery still queued finds no account and drops the message (`delivery.account_missing`).
 4. **The main app's copy is the main app's to delete.** For the demo receiver, add `--receiver` to the same command, which deletes its row.
 5. **Check:** the user and GitHub links no longer resolve, and the receiver page no longer shows the card.
    ```bash

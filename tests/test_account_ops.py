@@ -197,3 +197,44 @@ def test_the_script_never_prints_the_aws_account_id() -> None:
     assert mask(json.dumps({"arn": "arn:aws:dynamodb:us-east-1:123456789012:table/x"})) == (
         '{"arn": "arn:aws:dynamodb:us-east-1:<account>:table/x"}'
     )
+
+
+def test_a_reconnect_with_another_login_mid_delete_cancels_it(
+    gh: respx.MockRouter, tk_env: TokenKeeperEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # PR 9 review: the reconnect lands between delete_account's read and its
+    # transaction, moving the GitHub link from user 1234 to 5678. Without the version
+    # condition, GHUSER#5678 was left pointing at a deleted account, and that GitHub
+    # user could never connect again (already_linked).
+    from tests.github_fakes import user_body
+    from token_keeper.store import WriteConflict
+
+    mock_github(gh)
+    mock_events(gh)
+    connect_and_callback()
+    store = Store(TK_TABLE)
+    account_id = store.account_for_user("demo", "u_demo")
+    assert account_id
+
+    real = Store._linked_account
+    fired: list[str] = []
+
+    def reconnect_first(self: Store, pk: str) -> str | None:
+        if not fired:
+            fired.append(pk)
+            mock_github(gh, user=user_body(user_id=5678, login="octo-other"))
+            connect_and_callback()
+        return real(self, pk)
+
+    monkeypatch.setattr(Store, "_linked_account", reconnect_first)
+    with pytest.raises(WriteConflict):
+        store.delete_account(account_id)
+    monkeypatch.setattr(Store, "_linked_account", real)
+
+    # Nothing was deleted, and the new link still points at a live account.
+    assert store.account_for_github_user(5678) == account_id
+    assert account_item(account_id)["github_user_id"] == {"N": "5678"}
+    # Run again: everything goes, the moved link included.
+    deleted = store.delete_account(account_id)
+    assert "GHUSER#5678 META" in deleted
+    assert scan_table(TK_TABLE) == []

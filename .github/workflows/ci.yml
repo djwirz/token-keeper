@@ -44,7 +44,9 @@ jobs:
       - run: scripts/build_lambda.sh
       - run: npx cdk synth --quiet
         env:
+          # Placeholders: the hand-deployed stacks synth too, so they're checked.
           BUDGET_EMAIL: ci@example.invalid
+          ALERT_EMAIL: ci@example.invalid
 
   diff:
     # cdk diff against the deployed stacks, through the read-only OIDC role (spec §9,

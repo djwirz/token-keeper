@@ -98,7 +98,8 @@ The alarms live in `TokenKeeper`, which CI deploys. They notify the `token-keepe
    TOPIC=$(aws sns list-topics --query "Topics[?ends_with(TopicArn, ':token-keeper-alarms')].TopicArn" --output text)
    aws sns list-subscriptions-by-topic --topic-arn "$TOPIC" --query 'Subscriptions[].[Protocol, SubscriptionArn != `PendingConfirmation`]' --output text
    ```
-4. **Prove the email path** once the alarms are deployed. This flips one alarm by hand, and its next evaluation (within five minutes) puts it back, so two emails arrive. It changes no template property:
+4. **Expect three "OK" emails** right after the first deploy that creates the alarms, one per alarm. An OK action fires on any change to OK, including an alarm's first evaluation. They aren't a drill or a recovery. A replaced alarm (a renamed one, say) sends one again.
+5. **Prove the email path** once the alarms are deployed. This flips one alarm by hand, and its next evaluation (within five minutes) puts it back, so two emails arrive. It changes no template property:
    ```bash
    aws cloudwatch set-alarm-state --alarm-name token-keeper-refresh-failed --state-value ALARM --state-reason "email path check"
    ```

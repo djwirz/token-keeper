@@ -6,6 +6,7 @@ One AWS account, one environment (`demo`), region `us-east-1`. The decisions beh
 |---|---|---|
 | `Budget` | hand, once, first | $5/month budget, email alerts at 50% and 100% |
 | `CiRoles` | hand, once | GitHub OIDC provider, `DeployRole`, `DiffRole` |
+| `Alerts` | hand, once (slice 6) | SNS topic `token-keeper-alarms` and the alarm email subscription |
 | `DemoReceiver` | CI (after slice 4) | receiver API, Lambda, disposable table |
 | `TokenKeeper` | CI (after slice 4) | Token Keeper API, Lambdas, queues, schedule, RETAIN table and KMS key |
 
@@ -82,6 +83,25 @@ GitHub tells Token Keeper when Dan revokes the App, through `POST /github/webhoo
 4. **Rerun the IAM proof** (below). It has the webhook role's cases.
 
 A redelivery from Recent Deliveries is harmless when the original attempt got a 2xx: it keeps the original delivery GUID, which the account has recorded, so it writes nothing, even after a reconnect. A redelivery of an attempt that failed (a 5xx, or a 401 after a secret change) may never have been recorded. After a reconnect, it revokes the new grant: GitHub's payload has no timestamp to tell a stale revocation from a fresh one. So don't redeliver a failed revocation once Dan has reconnected.
+
+## Alarms (slice 6)
+
+The alarms live in `TokenKeeper`, which CI deploys. They notify the `token-keeper-alarms` topic, which lives in `Alerts`, a hand-deployed stack like `Budget`, so the address never reaches GitHub ([ADR 0019](adr/0019-observability-as-built.md)). What to do when one fires: [runbook.md](runbook.md).
+
+1. **The address:** add `ALERT_EMAIL=…` to the main checkout's `.env.local`. It can be the budget's address.
+2. **Deploy `Alerts`,** ideally before the CI deploy that adds the alarms. Alarms that fire before the topic exists change state but email no one. Like `Budget`, it uses the legacy synthesizer, and the address is read from the file, never typed:
+   ```bash
+   ALERT_EMAIL="$(sed -n 's/^ALERT_EMAIL=//p' .env.local)" npx cdk deploy Alerts
+   ```
+3. **Confirm the subscription:** AWS Notifications emails a link; click **Confirm subscription**. Never click "unsubscribe" in an alarm email: it silently ends every notification. Check without printing the address (`email True` means confirmed):
+   ```bash
+   TOPIC=$(aws sns list-topics --query "Topics[?ends_with(TopicArn, ':token-keeper-alarms')].TopicArn" --output text)
+   aws sns list-subscriptions-by-topic --topic-arn "$TOPIC" --query 'Subscriptions[].[Protocol, SubscriptionArn != `PendingConfirmation`]' --output text
+   ```
+4. **Prove the email path** once the alarms are deployed. This flips one alarm by hand, and its next evaluation (within five minutes) puts it back, so two emails arrive. It changes no template property:
+   ```bash
+   aws cloudwatch set-alarm-state --alarm-name token-keeper-refresh-failed --state-value ALARM --state-reason "email path check"
+   ```
 
 ## Forcing a refresh (proof, not routine)
 

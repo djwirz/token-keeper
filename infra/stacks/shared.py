@@ -14,3 +14,8 @@ PREFIX = "/token-keeper/demo/shared"
 CONNECT_URL_PARAM = f"{PREFIX}/connect-url"  # written by TokenKeeper
 RECEIVER_URL_PARAM = f"{PREFIX}/receiver-url"  # written by DemoReceiver
 GITHUB_CLIENT_ID_PARAM = f"{PREFIX}/github-client-id"  # created by hand
+
+# The alarm topic (ADR 0019). The hand-deployed Alerts stack creates it with this name,
+# and TokenKeeper's alarms build its ARN from the name: no export, and the email never
+# reaches CI.
+ALARM_TOPIC_NAME = "token-keeper-alarms"

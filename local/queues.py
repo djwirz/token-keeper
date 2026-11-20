@@ -37,7 +37,8 @@ def drain_once(queue_url: str, handler: LambdaHandler, wait_seconds: int = 1) ->
         QueueUrl=queue_url,
         MaxNumberOfMessages=10,
         WaitTimeSeconds=wait_seconds,
-        AttributeNames=["ApproximateReceiveCount"],
+        # What Lambda's SQS records carry, and the deliverer reads.
+        AttributeNames=["ApproximateReceiveCount", "SentTimestamp"],
         MessageAttributeNames=["All"],
     ).get("Messages", [])
     if not messages:

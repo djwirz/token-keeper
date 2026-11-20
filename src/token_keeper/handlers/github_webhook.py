@@ -27,7 +27,7 @@ import json
 import re
 from typing import Any
 
-from token_keeper import delivery, github, ids, log, settings
+from token_keeper import delivery, github, ids, log, metrics, settings
 from token_keeper.handlers._shared import store
 
 REVOCATION_EVENT = "github_app_authorization"
@@ -77,6 +77,7 @@ def _sender_id(payload: dict[str, Any]) -> int:
     return sender_id
 
 
+@metrics.flushed
 def handler(event: dict[str, Any], context: object) -> Response:
     correlation_id = ids.new("cor")
     logger = log.start(handler="github_webhook", correlation_id=correlation_id)
@@ -93,11 +94,13 @@ def handler(event: dict[str, Any], context: object) -> Response:
         )
     except github.WebhookSignatureError as exc:
         logger.info("github_webhook.rejected", extra={"reason": exc.reason})
+        metrics.count(metrics.GITHUB_WEBHOOK_REJECTED)
         return _empty(401)
     except _BadRequest as exc:
         # A body that can't be decoded can't be verified either: 401, as for a bad
         # signature (spec §6.4), not 400 (PR 6 review).
         logger.info("github_webhook.rejected", extra={"reason": exc.reason})
+        metrics.count(metrics.GITHUB_WEBHOOK_REJECTED)
         return _empty(401)
 
     # Signed by GitHub from here on (the body, not the headers).
@@ -111,8 +114,11 @@ def handler(event: dict[str, Any], context: object) -> Response:
             )
             return _empty(204)
         sender_id = _sender_id(payload)
+        # A verified revocation, whatever comes of it (unknown user, repeat, acted on).
+        metrics.count(metrics.REVOCATION_RECEIVED)
     except _BadRequest as exc:
         logger.info("github_webhook.rejected", extra={"reason": exc.reason})
+        metrics.count(metrics.GITHUB_WEBHOOK_REJECTED)
         return _empty(400)
 
     account_id = store().account_for_github_user(sender_id)

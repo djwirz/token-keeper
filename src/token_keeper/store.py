@@ -642,6 +642,50 @@ class Store:
             raise
         return True
 
+    def delete_account(self, account_id: str) -> list[str]:
+        """Delete everything stored for one account (spec §2, runbook). Operator only.
+
+        The Account, its Snapshot, and each link that still points at it, in one
+        transaction. A link that has moved to another account (a reconnect with another
+        GitHub login moves it) is left alone. No Lambda role can call this: none has
+        ``DeleteItem`` on these rows.
+
+        A worker mid-sync can't bring anything back: its writes are conditional on its
+        lease, which goes with the Account item, and its snapshot is written in the same
+        transaction as that condition. Returns the keys deleted; empty if there was no
+        Account.
+        """
+        response = self._client.get_item(
+            TableName=self._table, Key=_key(account_pk(account_id)), ConsistentRead=True
+        )
+        item = response.get("Item")
+        if item is None:
+            return []
+        keys = [_key(account_pk(account_id)), _key(account_pk(account_id), SNAPSHOT)]
+        items: list[TransactWriteItemTypeDef] = [
+            {"Delete": {"TableName": self._table, "Key": key}} for key in keys
+        ]
+        for pk in (
+            _link_pk(item["app_id"]["S"], item["external_user_id"]["S"]),
+            _github_pk(int(item["github_user_id"]["N"])),
+        ):
+            if self._linked_account(pk) != account_id:
+                continue
+            keys.append(_key(pk))
+            items.append(
+                {
+                    "Delete": {
+                        "TableName": self._table,
+                        "Key": _key(pk),
+                        # A link that moved between the read and here stays.
+                        "ConditionExpression": "account_id = :id",
+                        "ExpressionAttributeValues": {":id": {"S": account_id}},
+                    }
+                }
+            )
+        self._transact(items)
+        return [f"{key['PK']['S']} {key['SK']['S']}" for key in keys]
+
     def _transact(self, items: list[TransactWriteItemTypeDef]) -> None:
         try:
             self._client.transact_write_items(TransactItems=items)

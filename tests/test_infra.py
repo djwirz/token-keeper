@@ -13,6 +13,7 @@ from aws_cdk import aws_lambda as lambda_
 from aws_cdk.assertions import Match, Template
 
 from infra.app import ENV
+from infra.stacks.alerts import AlertsStack
 from infra.stacks.budget import BudgetStack
 from infra.stacks.ci_roles import (
     DEPLOY_SUBJECT,
@@ -20,7 +21,12 @@ from infra.stacks.ci_roles import (
     CiRolesStack,
 )
 from infra.stacks.demo_receiver import SECRET_PARAMS, DemoReceiverStack
-from infra.stacks.shared import CONNECT_URL_PARAM, GITHUB_CLIENT_ID_PARAM, RECEIVER_URL_PARAM
+from infra.stacks.shared import (
+    ALARM_TOPIC_NAME,
+    CONNECT_URL_PARAM,
+    GITHUB_CLIENT_ID_PARAM,
+    RECEIVER_URL_PARAM,
+)
 from infra.stacks.token_keeper import (
     DELIVERER_BATCH_SIZE,
     PLANNER_ATTRIBUTES,
@@ -30,8 +36,10 @@ from infra.stacks.token_keeper import (
 )
 from infra.stacks.token_keeper import SECRET_PARAMS as TK_SECRET_PARAMS
 from receiver.store import KEY_SCHEMA
+from token_keeper import metrics
 from token_keeper.handlers.deliverer import MAX_RECEIVES
 from token_keeper.handlers.worker import MAX_RECEIVES as SYNC_MAX_RECEIVES
+from token_keeper.log import SERVICE
 from token_keeper.store import ATTRIBUTE_DEFINITIONS as TK_ATTRIBUTE_DEFINITIONS
 from token_keeper.store import GLOBAL_SECONDARY_INDEXES, LEASE_SECONDS, TTL_ATTRIBUTE
 from token_keeper.store import KEY_SCHEMA as TK_KEY_SCHEMA
@@ -350,8 +358,10 @@ def test_each_role_has_exactly_what_its_handler_needs(token_keeper: Template) ->
     scheduler_role = _logical_id(token_keeper, "AWS::IAM::Role", "SchedulerRoleForTarget")
     planner = f"${{{planner_id}.Arn}}"
     assert set(grants) == {_role_of(token_keeper, h) for h in expected} | {scheduler_role}
+    # Active tracing (ADR 0019) adds these two to every function's role, and nothing else.
+    xray = {("xray:PutTraceSegments", "*"), ("xray:PutTelemetryRecords", "*")}
     for handler_path, pairs in expected.items():
-        assert grants[_role_of(token_keeper, handler_path)] == pairs, handler_path
+        assert grants[_role_of(token_keeper, handler_path)] == pairs | xray, handler_path
     # The schedule's role can invoke the planner and nothing else.
     assert grants[scheduler_role] == {
         ("lambda:InvokeFunction", planner),
@@ -648,9 +658,10 @@ def test_budget_and_ci_roles_deploy_without_a_bootstrap() -> None:
     # first real deploy then failed trying to assume the bootstrap deploy role.)
     app = cdk.App()
     BudgetStack(app, "Budget", email="ci@example.invalid", env=ENV)
+    AlertsStack(app, "Alerts", email="ci@example.invalid", env=ENV)
     CiRolesStack(app, "CiRoles", env=ENV)
     assembly = app.synth()
-    for name in ("Budget", "CiRoles"):
+    for name in ("Budget", "Alerts", "CiRoles"):
         stack = assembly.get_stack_by_name(name)
         assert stack.assume_role_arn is None, name
         assert stack.cloud_formation_execution_role_arn is None, name
@@ -660,7 +671,170 @@ def test_budget_and_ci_roles_deploy_without_a_bootstrap() -> None:
 
 
 def test_no_template_holds_an_account_id(
-    budget: Template, ci_roles: Template, receiver: Template, token_keeper: Template
+    budget: Template,
+    alerts: Template,
+    ci_roles: Template,
+    receiver: Template,
+    token_keeper: Template,
 ) -> None:
-    for template in (budget, ci_roles, receiver, token_keeper):
+    for template in (budget, alerts, ci_roles, receiver, token_keeper):
         assert not re.search(r"\b\d{12}\b", json.dumps(template.to_json()))
+
+
+# Observability (slice 6, spec §8, ADR 0019) ----------------------------------------
+
+# The Alerts stack's topic, by name. The test app writes the partition as a Ref; the real
+# app (with cdk.json's context) writes "aws". Either is right; an account literal isn't.
+TOPIC_ARN = re.compile(
+    rf"arn:(aws|\$\{{AWS::Partition\}}):sns:{ENV.region}:\$\{{AWS::AccountId\}}:{ALARM_TOPIC_NAME}"
+)
+
+
+def _is_topic(actions: list[Any]) -> bool:
+    return len(actions) == 1 and TOPIC_ARN.fullmatch(_flatten(actions[0])) is not None
+
+
+@pytest.fixture(scope="module")
+def alerts() -> Template:
+    return Template.from_stack(
+        AlertsStack(cdk.App(), "Alerts", email="ci@example.invalid", env=ENV)
+    )
+
+
+def test_alerts_stack_is_the_named_topic_and_one_email(alerts: Template) -> None:
+    alerts.resource_count_is("AWS::SNS::Topic", 1)
+    alerts.has_resource_properties("AWS::SNS::Topic", {"TopicName": ALARM_TOPIC_NAME})
+    alerts.resource_count_is("AWS::SNS::Subscription", 1)
+    alerts.has_resource_properties(
+        "AWS::SNS::Subscription", {"Protocol": "email", "Endpoint": "ci@example.invalid"}
+    )
+
+
+def test_ci_never_builds_the_alerts_stack(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    # CI has no ALERT_EMAIL, so it can't synth or deploy the stack that holds the
+    # address (ADR 0016, ADR 0019). TokenKeeper doesn't depend on it either.
+    import infra.app as app_module
+
+    monkeypatch.delenv("ALERT_EMAIL", raising=False)
+    monkeypatch.delenv("BUDGET_EMAIL", raising=False)
+    build = tmp_path / "lambda"
+    (build / "token_keeper" / "handlers").mkdir(parents=True)
+    (build / "token_keeper" / "handlers" / "callback.py").write_text("")
+    monkeypatch.setattr(app_module, "LAMBDA_BUILD", build)
+    apps: list[cdk.App] = []
+
+    class RecordingApp(cdk.App):
+        def __init__(self) -> None:
+            super().__init__(outdir=str(tmp_path / "out"))
+            apps.append(self)
+
+    monkeypatch.setattr(cdk, "App", RecordingApp)
+    app_module.main()
+    (app,) = apps
+    names = {c.node.id for c in app.node.children if isinstance(c, cdk.Stack)}
+    assert names == {"CiRoles", "DemoReceiver", "TokenKeeper"}
+
+    # With the variable set (Dan's desk only), it's there.
+    monkeypatch.setenv("ALERT_EMAIL", "ci@example.invalid")
+    app_module.main()
+    assert "Alerts" in {c.node.id for c in apps[1].node.children}
+
+
+def test_the_token_keeper_stack_creates_no_topic(token_keeper: Template) -> None:
+    token_keeper.resource_count_is("AWS::SNS::Topic", 0)
+    token_keeper.resource_count_is("AWS::SNS::Subscription", 0)
+
+
+def test_every_function_is_traced_and_names_the_metrics_namespace(
+    token_keeper: Template,
+) -> None:
+    functions = token_keeper.find_resources("AWS::Lambda::Function")
+    assert len(functions) == 6
+    for logical, function in functions.items():
+        props = function["Properties"]
+        assert props["TracingConfig"] == {"Mode": "Active"}, logical
+        env = props["Environment"]["Variables"]
+        assert env["POWERTOOLS_METRICS_NAMESPACE"] == metrics.NAMESPACE, logical
+        assert env["POWERTOOLS_SERVICE_NAME"] == SERVICE, logical
+
+
+def _alarm(template: Template, name: str) -> dict[str, Any]:
+    (alarm,) = template.find_resources(
+        "AWS::CloudWatch::Alarm", {"Properties": {"AlarmName": name}}
+    ).values()
+    props: dict[str, Any] = alarm["Properties"]
+    return props
+
+
+def test_there_are_exactly_three_alarms_and_each_emails_on_alarm_and_ok(
+    token_keeper: Template,
+) -> None:
+    alarms = token_keeper.find_resources("AWS::CloudWatch::Alarm")
+    assert len(alarms) == 3
+    for logical, alarm in alarms.items():
+        props = alarm["Properties"]
+        assert _is_topic(props["AlarmActions"]), logical
+        assert _is_topic(props["OKActions"]), logical
+        assert "docs/runbook.md#" in props["AlarmDescription"], logical
+
+
+def test_dlq_alarm_watches_both_dlqs(token_keeper: Template) -> None:
+    props = _alarm(token_keeper, "token-keeper-dlq-messages")
+    assert props["Threshold"] == 1
+    assert props["ComparisonOperator"] == "GreaterThanOrEqualToThreshold"
+    assert props["EvaluationPeriods"] == 1
+    assert props["TreatMissingData"] == "notBreaching"
+    by_id = {m["Id"]: m for m in props["Metrics"]}
+    assert by_id["expr_1"]["Expression"] == "MAX([FILL(sync, 0), FILL(delivery, 0)])"
+    sync_dlq = _logical_id(token_keeper, "AWS::SQS::Queue", "SyncDlq")
+    delivery_dlq = _logical_id(token_keeper, "AWS::SQS::Queue", "DeliveryDlq")
+    watched = set()
+    for key in ("sync", "delivery"):
+        stat = by_id[key]["MetricStat"]
+        assert stat["Metric"]["MetricName"] == "ApproximateNumberOfMessagesVisible"
+        assert stat["Stat"] == "Maximum"
+        (dimension,) = stat["Metric"]["Dimensions"]
+        watched.add(dimension["Value"]["Fn::GetAtt"][0])
+    assert watched == {sync_dlq, delivery_dlq}
+
+
+def test_refresh_failed_alarm_is_one_in_an_hour(token_keeper: Template) -> None:
+    props = _alarm(token_keeper, "token-keeper-refresh-failed")
+    assert props["Namespace"] == metrics.NAMESPACE
+    assert props["MetricName"] == metrics.REFRESH_FAILED
+    # The one dimension the handlers emit, or the alarm watches nothing.
+    assert props["Dimensions"] == [{"Name": "service", "Value": SERVICE}]
+    assert props["Statistic"] == "Sum"
+    assert props["Threshold"] == 1
+    assert props["ComparisonOperator"] == "GreaterThanOrEqualToThreshold"
+    assert props["Period"] * props["EvaluationPeriods"] == 3600
+    assert props["DatapointsToAlarm"] == 1
+    assert props["TreatMissingData"] == "notBreaching"
+
+
+def test_planner_missing_alarm_breaches_on_45_minutes_of_silence(
+    token_keeper: Template,
+) -> None:
+    props = _alarm(token_keeper, "token-keeper-planner-missing")
+    planner_id = _logical_id(token_keeper, "AWS::Lambda::Function", "Planner")
+    assert props["Namespace"] == "AWS/Lambda"
+    assert props["MetricName"] == "Invocations"
+    assert props["Dimensions"] == [{"Name": "FunctionName", "Value": {"Ref": planner_id}}]
+    assert props["Statistic"] == "Sum"
+    assert props["Threshold"] == 1
+    assert props["ComparisonOperator"] == "LessThanThreshold"
+    assert props["Period"] * props["EvaluationPeriods"] == 45 * 60
+    assert props["DatapointsToAlarm"] == props["EvaluationPeriods"]
+    # No data is the failure: a disabled schedule emits nothing at all.
+    assert props["TreatMissingData"] == "breaching"
+
+
+def test_the_dashboard_shows_every_metric_and_each_lambdas_errors(
+    token_keeper: Template,
+) -> None:
+    (dashboard,) = token_keeper.find_resources("AWS::CloudWatch::Dashboard").values()
+    body = json.dumps(dashboard["Properties"]["DashboardBody"])
+    for name in metrics.ALL:
+        assert f'\\"{name}\\"' in body, name
+    assert body.count('\\"Errors\\"') == 6
+    assert body.count('\\"ApproximateNumberOfMessagesVisible\\"') == 4

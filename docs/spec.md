@@ -29,7 +29,7 @@ It shows AWS serverless (EventBridge Scheduler → SQS → Lambda, DynamoDB), OA
 ## 3. Appetite
 
 - **Time:** one to two focused weeks. Two is the honest estimate.
-- **Money:** a $5/month AWS budget with alerts at 50% and 100%, created **before** the first deploy. Expected costs are the customer-managed KMS key (about a dollar a month) and a handful of custom CloudWatch metrics (low single dollars at worst, see §8). Everything else should round to nothing at demo volume.
+- **Money:** a $5/month AWS budget with alerts at 50% and 100%, created **before** the first deploy. Expected costs are the customer-managed KMS key (about a dollar a month) and a handful of custom CloudWatch metrics, which should fall inside CloudWatch's free tier (see §8). Everything else should round to nothing at demo volume.
 - **Shape:** seven thin PRs after this one, local-first: the first three never touch AWS (see §12).
 - **If time runs short, cut in this order.** The project exists to prove a few things: the refresh lifecycle survives concurrency, tokens are safe, it's deployed and operable, and the GIF shows it working. Cut what proves none of those first:
   1. `cdk diff` posted to PRs (CI still runs `cdk synth`).
@@ -203,13 +203,13 @@ See [ADR 0010](adr/0010-github-revocation-webhook.md) and [ADR 0018](adr/0018-re
 Powertools for AWS Lambda (Python): structured JSON logs, EMF metrics and X-Ray traces ([ADR 0009](adr/0009-observability-powertools.md)).
 
 - **Logs:** every line carries `account_id`, `app_id`, `webhook_id` where relevant, and `correlation_id` (passed through SQS message attributes). Failure reasons go in logs, not metric dimensions. There's a log scrubber, and a test asserts that no token-shaped string (`ghu_`, `ghr_`) ever reaches a log line. Log groups keep two weeks.
-- **Metrics** (one `service` dimension, no others; Powertools' cold-start metric off): `RefreshSucceeded`, `RefreshFailed`, `SyncSucceeded`, `SyncFailed`, `DeliverySucceeded`, `DeliveryFailed`, `DeliveryLatency`, `AccountsDue` (from the planner), `ConnectRejected`, `RevocationReceived`. That's about ten custom metrics; most are only emitted a few hours a day, so the cost stays at a dollar or two at worst.
-- **Traces:** connect → callback, and each Lambda's own segment. SQS hops show up as linked traces, not one continuous trace; the `correlation_id` in logs ties a whole flow together.
+- **Metrics** (namespace `TokenKeeper`, one `service` dimension, no others; Powertools' cold-start metric off): `RefreshSucceeded`, `RefreshFailed` (GitHub rejected the refresh; transient errors aren't counted), `SyncSucceeded`, `SyncFailed`, `DeliverySucceeded`, `DeliveryFailed`, `DeliveryLatency` (from the first enqueue to the 2xx), `AccountsDue` (from the planner, every run), `ConnectRejected` (connect links and callbacks), `GitHubWebhookRejected` (forged or malformed GitHub deliveries) and `RevocationReceived`. Eleven custom metrics. Only `AccountsDue` is emitted around the clock, and metrics are billed by the hour they're emitted, so this should stay inside CloudWatch's free tier. Exactly what each counts: [ADR 0019](adr/0019-observability-as-built.md).
+- **Traces:** Lambda active tracing gives each Lambda its own segment, with no X-Ray SDK (the SDKs lose support in February 2027). SQS hops show up as linked traces, and connect and callback are separate traces too, because the browser goes through GitHub between them. The `correlation_id` in logs ties a whole flow together. HTTP APIs don't emit X-Ray segments.
 - **Dashboard:** one CloudWatch dashboard covering the metrics above, queue depths and Lambda errors.
-- **Alarms (SNS → email):**
-  1. **DLQ:** either DLQ has one or more visible messages. Forced by pointing the deliverer at a URL that returns 500 with a short retry window.
-  2. **Refresh failure:** `RefreshFailed` sums to one or more in an hour. Forced with a synthetic account whose stored refresh token is invalid.
-  3. **Planner missing:** the planner's `Invocations` metric is absent for 45 minutes (missing data treated as breaching). Forced by disabling the schedule.
+- **Alarms (SNS → email, on ALARM and on OK):** the topic and its email subscription live in a hand-deployed `Alerts` stack, so the address never reaches the repo, GitHub or CI ([ADR 0019](adr/0019-observability-as-built.md)).
+  1. **DLQ:** either DLQ has one or more visible messages. Forced with a message that isn't JSON on the sync queue: the worker fails it three times and SQS moves it to the sync DLQ. Redrive is then proven with a valid delivery message moved back from the delivery DLQ.
+  2. **Refresh failure:** `RefreshFailed` sums to one or more in an hour. Forced with a synthetic account whose stored refresh token is invalid (`scripts/account_ops.py`), deleted afterwards with the runbook's own procedure.
+  3. **Planner missing:** the planner's `Invocations` metric is absent for 45 minutes (missing data treated as breaching). Forced by disabling the schedule, then re-enabling it with its whole definition and checking it against the template.
 - **Runbook:** `docs/runbook.md` gets one section per alarm (what it means, how to check, how to recover, including DLQ redrive), plus how to delete an account's data on request.
 - **Budget:** an AWS Budget of $5/month, alerting by email at 50% and 100%, created by CDK and deployed first.
 
@@ -228,7 +228,7 @@ Powertools for AWS Lambda (Python): structured JSON logs, EMF metrics and X-Ray 
 
 ## 10. Infrastructure as code, testing and CI
 
-- **IaC:** AWS CDK in Python, with two stacks, `TokenKeeper` and `DemoReceiver`, plus a tiny `Budget` stack deployed first and a `CiRoles` stack for the OIDC roles ([ADR 0006](adr/0006-aws-cdk-python-for-iac.md), [ADR 0016](adr/0016-ci-deploys-through-oidc-and-bootstrap-roles.md)). Templates are environment-agnostic apart from the region, so no account ID is written into them. Operator steps: `docs/deploy.md`.
+- **IaC:** AWS CDK in Python, with two stacks, `TokenKeeper` and `DemoReceiver`, plus a tiny `Budget` stack deployed first, a `CiRoles` stack for the OIDC roles, and an `Alerts` stack for the alarm email ([ADR 0006](adr/0006-aws-cdk-python-for-iac.md), [ADR 0016](adr/0016-ci-deploys-through-oidc-and-bootstrap-roles.md), [ADR 0019](adr/0019-observability-as-built.md)). `Budget`, `CiRoles` and `Alerts` are deployed by hand. Templates are environment-agnostic apart from the region, so no account ID is written into them. Operator steps: `docs/deploy.md`.
 - **Layout:** `src/token_keeper/` for the app (Python 3.12), `infra/` for CDK, `receiver/` for the demo receiver, `local/` for the local runner, and `tests/`.
 - **Data that must survive any deploy:** Token Keeper's DynamoDB table and the KMS key are set to `RETAIN`. (The demo receiver's table is disposable and is destroyed with its stack.) A table replacement would lose every token, and a deleted key would make every stored token unreadable. CDK assertion tests check both.
 
@@ -268,7 +268,7 @@ Slices 1–3 are local only. Each one also adds the CDK code for what it builds,
 3. **Sync and refresh, locally:** planner → queue → worker with snapshot, refresh under lease, the state machine and failure handling, and the three concurrency tests. Real refresh-token rotations against Dan's GitHub account. The store's takeover write for revocation lands here too (the concurrency test needs it); slice 5 calls it from the webhook.
 4. **First deploy:** the Budget stack first, then the OIDC deploy roles, then `DemoReceiver` and `TokenKeeper` with everything built so far (no second receiver deploy: URLs go through SSM, ADR 0014). Fix what real IAM, Scheduler and SQS wiring turn up. Prove or drop the IAM narrowing put off until now. Ends with a deployed connect, a deployed sync and one real refresh.
 5. **Revocation webhook:** `github-webhook` λ, tested locally with recorded deliveries, then live in `demo` with the instant flip to `needs_reauth`. Deploys stay on CI: the PR merges on local tests, CI deploys it, and the live revocation, the IAM probe and any fixes follow in a small PR ([ADR 0018](adr/0018-revocation-webhook-redeliveries-and-trust.md)). Proven live on 2026-11-20: revoke, flip, redeliver, reconnect, redeliver.
-6. **Observability:** metrics, dashboard, alarms (each forced once), runbook.
+6. **Observability:** metrics, traces, dashboard, alarms (each forced once), runbook ([ADR 0019](adr/0019-observability-as-built.md)). Deploys stay on CI, as in slice 5: the PR merges on local tests, Dan deploys `Alerts` by hand and confirms the email, CI deploys the rest, and the alarm drills and any fixes follow in a small PR.
 7. **Demo polish:** cadence knob, README GIF, case-study notes.
 
 The trade-off: IAM and wiring surprises all land in slice 4 instead of spread across slices. With nothing live and one user, that's accepted. If slice 4 looks too big while slice 2 is in progress, deploy the receiver alone at the end of slice 2.

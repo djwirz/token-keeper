@@ -642,6 +642,67 @@ class Store:
             raise
         return True
 
+    def delete_account(self, account_id: str) -> list[str]:
+        """Delete everything stored for one account (spec §2, runbook). Operator only.
+
+        The Account, its Snapshot, and each link that points at it, in one transaction.
+        A link that already points at another account (a reconnect with another GitHub
+        login moves it) is left out. No handler calls this. The callback role has
+        ``DeleteItem`` on the whole table (it deletes state and GitHub link rows), so IAM
+        alone wouldn't stop it.
+
+        The Account's delete is conditional on the ``version`` that was read. Every write
+        bumps it (ADR 0015), so a reconnect, lease or revocation between the read and the
+        delete cancels the whole transaction (``WriteConflict``: nothing is deleted, run
+        it again). Without that, a reconnect with another GitHub login could move the
+        GitHub link after the read and leave it pointing at a deleted account, which
+        would lock that GitHub user out (PR 9 review).
+
+        A worker mid-sync can't bring anything back: its writes are conditional on its
+        lease, which goes with the Account item, and its snapshot is written in the same
+        transaction as that condition. Returns the keys deleted; empty if there was no
+        Account.
+        """
+        response = self._client.get_item(
+            TableName=self._table, Key=_key(account_pk(account_id)), ConsistentRead=True
+        )
+        item = response.get("Item")
+        if item is None:
+            return []
+        keys = [_key(account_pk(account_id)), _key(account_pk(account_id), SNAPSHOT)]
+        items: list[TransactWriteItemTypeDef] = [
+            {
+                "Delete": {
+                    "TableName": self._table,
+                    "Key": keys[0],
+                    "ConditionExpression": "version = :v",
+                    "ExpressionAttributeValues": {":v": item["version"]},
+                }
+            },
+            {"Delete": {"TableName": self._table, "Key": keys[1]}},
+        ]
+        for pk in (
+            _link_pk(item["app_id"]["S"], item["external_user_id"]["S"]),
+            _github_pk(int(item["github_user_id"]["N"])),
+        ):
+            if self._linked_account(pk) != account_id:
+                continue
+            keys.append(_key(pk))
+            items.append(
+                {
+                    "Delete": {
+                        "TableName": self._table,
+                        "Key": _key(pk),
+                        # Belt and braces: the version condition already cancels
+                        # the transaction if anything moved since the read.
+                        "ConditionExpression": "account_id = :id",
+                        "ExpressionAttributeValues": {":id": {"S": account_id}},
+                    }
+                }
+            )
+        self._transact(items)
+        return [f"{key['PK']['S']} {key['SK']['S']}" for key in keys]
+
     def _transact(self, items: list[TransactWriteItemTypeDef]) -> None:
         try:
             self._client.transact_write_items(TransactItems=items)

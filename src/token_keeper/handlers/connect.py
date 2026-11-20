@@ -12,7 +12,7 @@ import hashlib
 import secrets
 from typing import Any
 
-from token_keeper import crypto, github, ids, log, pages, settings
+from token_keeper import crypto, github, ids, log, metrics, pages, settings
 from token_keeper.contract import connect_links
 from token_keeper.handlers._shared import crypto as kms
 from token_keeper.handlers._shared import now, store
@@ -27,6 +27,7 @@ def pkce_pair() -> tuple[str, str]:
     return verifier, challenge
 
 
+@metrics.flushed
 def handler(event: dict[str, Any], context: object) -> pages.Response:
     logger = log.start(handler="connect")
     cfg = settings.get()
@@ -40,6 +41,7 @@ def handler(event: dict[str, Any], context: object) -> pages.Response:
         )
     except connect_links.ConnectLinkError as exc:
         logger.info("connect.rejected", extra={"reason": exc.reason})
+        metrics.count(metrics.CONNECT_REJECTED)
         return pages.error_page()
 
     correlation_id = ids.new("cor")

@@ -25,7 +25,7 @@ import dataclasses
 import json
 from typing import Any
 
-from token_keeper import crypto, delivery, github, ids, log, settings, snapshot, sync
+from token_keeper import crypto, delivery, github, ids, log, metrics, settings, snapshot, sync
 from token_keeper.delivery import CORRELATION_ATTRIBUTE
 from token_keeper.handlers._shared import crypto as kms
 from token_keeper.handlers._shared import encrypt_tokens, now, store
@@ -92,6 +92,10 @@ class _Sync:
                 now=current,
             )
         except github.GitHubError as exc:
+            if isinstance(exc, github.RefreshRejected | github.CredentialsRejected):
+                # Only a rejection counts, of the refresh token or of our own client
+                # credentials: an outage doesn't alarm (ADR 0019).
+                metrics.count(metrics.REFRESH_FAILED)
             self.logger.warning("refresh.failed", extra={"reason": exc.reason})
             raise
         self.refreshed = True
@@ -102,6 +106,7 @@ class _Sync:
         # From here on, the only tokens this sync holds are the ones just stored: the old
         # refresh token is dead at GitHub (PR 4 review: don't leave it in reach).
         self.leased = dataclasses.replace(self.leased, tokens=encrypted)
+        metrics.count(metrics.REFRESH_SUCCEEDED)
         self.logger.info("refresh.succeeded")
         return pair.access_token
 
@@ -121,6 +126,7 @@ class _Sync:
             next_due_at=sync.next_sync_at(current),
         )
         self.send_event()
+        metrics.count(metrics.SYNC_SUCCEEDED)
         self.logger.info(
             "sync.succeeded", extra={"refreshed": self.refreshed, "events": len(events)}
         )
@@ -128,10 +134,12 @@ class _Sync:
     def needs_reauth(self, reason: str) -> None:
         store().finish_needs_reauth(self.leased, reason=reason)
         self.send_event()
+        metrics.count(metrics.SYNC_FAILED)
         self.logger.warning("sync.needs_reauth", extra={"reason": reason})
 
     def transient(self, reason: str, next_due_at: int) -> None:
         store().finish_transient(self.leased, error_code=reason, next_due_at=next_due_at)
+        metrics.count(metrics.SYNC_FAILED)
         self.logger.warning(
             "sync.failed",
             extra={"reason": reason, "retry_in": next_due_at - now()},
@@ -163,6 +171,7 @@ def sync_account(account_id: str, correlation_id: str) -> None:
         logger.warning("lease_lost")
 
 
+@metrics.flushed
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     failures: list[dict[str, str]] = []
     for record in event.get("Records", []):
@@ -175,5 +184,6 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             sync_account(message["account_id"], correlation)
         except Exception:
             log.get_logger().exception("sync.error")
+            metrics.count(metrics.SYNC_FAILED)
             failures.append({"itemIdentifier": record["messageId"]})
     return {"batchItemFailures": failures}

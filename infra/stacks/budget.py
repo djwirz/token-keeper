@@ -29,6 +29,9 @@ class BudgetStack(Stack):
                 budget_type="COST",
                 time_unit="MONTHLY",
                 budget_limit=budgets.CfnBudget.SpendProperty(amount=MONTHLY_LIMIT_USD, unit="USD"),
+                # Count usage before credits: on the free account plan, credits pay the
+                # bill, and a budget net of them would sit at $0 and never alert.
+                cost_types=budgets.CfnBudget.CostTypesProperty(include_credit=False),
             ),
             notifications_with_subscribers=[
                 budgets.CfnBudget.NotificationWithSubscribersProperty(

@@ -9,7 +9,13 @@ One AWS account, one environment (`demo`), region `us-east-1`. The decisions beh
 | `DemoReceiver` | CI (after slice 4) | receiver API, Lambda, disposable table |
 | `TokenKeeper` | CI (after slice 4) | Token Keeper API, Lambdas, queues, schedule, RETAIN table and KMS key |
 
-Every command below assumes `AWS_PROFILE=token-keeper` (an IAM Identity Center admin session: `aws sso login --profile token-keeper`), Node 22+, and a fresh Lambda build (`scripts/build_lambda.sh`).
+Every command below assumes `AWS_PROFILE=token-keeper`, Node 22+, and a fresh Lambda build (`scripts/build_lambda.sh`).
+
+**Operator access.** The account is on AWS's free account plan. That plan can't create an AWS Organization, so IAM Identity Center is out until the account is upgraded. Instead:
+- Root has MFA and is used for nothing else.
+- One IAM user with `AdministratorAccess`, MFA and an account alias, so the sign-in URL carries no account ID.
+- The CLI signs in through the browser with `aws login --profile token-keeper` (AWS CLI 2.32+). Its credentials are short-lived, and no access keys exist anywhere.
+- When the account moves to the paid plan, Identity Center can replace the IAM user.
 
 ## First deploy, in order
 

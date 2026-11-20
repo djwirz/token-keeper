@@ -66,7 +66,12 @@ def test_budget_is_five_dollars_with_two_email_alerts(budget: Template) -> None:
         "AWS::Budgets::Budget",
         {
             "Budget": Match.object_like(
-                {"BudgetLimit": {"Amount": 5, "Unit": "USD"}, "TimeUnit": "MONTHLY"}
+                {
+                    "BudgetLimit": {"Amount": 5, "Unit": "USD"},
+                    "TimeUnit": "MONTHLY",
+                    # Before credits, or a credit-funded account never alerts.
+                    "CostTypes": {"IncludeCredit": False},
+                }
             ),
             "NotificationsWithSubscribers": [
                 {

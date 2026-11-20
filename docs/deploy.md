@@ -61,7 +61,11 @@ GitHub tells Token Keeper when Dan revokes the App, through `POST /github/webhoo
    uv run python scripts/put_demo_secrets.py --profile token-keeper --github-webhook-secret
    ```
    It refuses if the parameter exists. With `--overwrite` it makes a new one, and the App's setting must then be pasted again. A warm Lambda keeps the old value, and answers 401 to every real delivery until it's recycled. GitHub never retries, so after an overwrite:
-   - force a cold start: `aws lambda update-function-configuration --function-name "$FN" --description "secret rotated $(date +%F)"`, where `$FN` is the `GitHubWebhook` function's name from the stack's resources;
+   - force a cold start, where `$FN` is the `GitHubWebhook` function's name from the stack's resources. Change the description, then clear it again. Each update replaces the warm instances, and clearing it leaves the function matching the template. The template sets no description, so CloudFormation won't clear one left behind, and a deploy with no changes doesn't touch the function at all (seen 2026-11-20):
+     ```bash
+     aws lambda update-function-configuration --function-name "$FN" --description "secret rotated" && aws lambda wait function-updated-v2 --function-name "$FN"
+     aws lambda update-function-configuration --function-name "$FN" --description "" && aws lambda wait function-updated-v2 --function-name "$FN"
+     ```
    - then press Redeliver on anything that failed in Recent Deliveries.
 2. **The GitHub App**, only once the deploy has finished (GitHub sends its `ping` when the webhook is saved, and doesn't retry a 404): Settings → Developer settings → GitHub Apps → the App → General → Webhook:
    - tick **Active**;

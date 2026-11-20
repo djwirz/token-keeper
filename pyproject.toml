@@ -49,7 +49,7 @@ ignore = ["S101"]  # assert is fine in tests
 
 [tool.mypy]
 python_version = "3.12"
-files = ["src", "receiver", "local", "infra", "tests"]
+files = ["src", "receiver", "local", "infra", "tests", "scripts"]
 strict = true
 mypy_path = "src"
 explicit_package_bases = true

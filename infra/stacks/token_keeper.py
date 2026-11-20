@@ -13,9 +13,8 @@ One role per Lambda, granted exactly what its handler does (spec §9, ADR 0003):
   and ``SendMessage`` to the delivery queue.
 - deliverer: ``Query`` (account + snapshot) and the queue; no KMS at all.
 - planner: ``Query`` on the ``due`` index only, ``UpdateItem`` and ``SendMessage``
-  to the sync queue; no KMS. Its code only updates ``next_due_at`` and ``version``,
-  but the role allows ``UpdateItem`` on the whole table until a ``dynamodb:Attributes``
-  condition can be proven in a deploy (slice 4).
+  to the sync queue; no KMS. Its ``UpdateItem`` is limited to the attributes its code
+  touches (``dynamodb:Attributes``) and returns nothing (``dynamodb:ReturnValues``).
 - worker: ``kms:Encrypt`` and ``kms:Decrypt`` (the only other role with Decrypt),
   ``UpdateItem``/``PutItem`` (lease, tokens, snapshot) and ``SendMessage`` to the
   delivery queue.
@@ -23,6 +22,12 @@ One role per Lambda, granted exactly what its handler does (spec §9, ADR 0003):
 Table grants are written as explicit statements on the table ARN, because
 ``table.grant()`` also grants every index once the table has one. Only the planner
 reads the index.
+
+Item-level narrowing (ADR 0017): every role that touches only one kind of item gets a
+``dynamodb:LeadingKeys`` condition on its partition-key prefix: connect ``STATE#``;
+planner, worker and deliverer ``ACCOUNT#``. The callback writes all four prefixes, so
+a condition would exclude nothing and it has none. The planner's index ``Query`` has
+none either: there the leading key is ``state``.
 
 The worker's timeout (40 s) is below its 60 s lease, so it can't outlive the lease
 (ADR 0004, ADR 0015). Both queue consumers take one message per invocation.
@@ -72,8 +77,19 @@ WORKER_TIMEOUT_SECONDS = 40
 WORKER_BATCH_SIZE = 1
 PLANNER_TIMEOUT_SECONDS = 60
 PLANNER_RATE_MINUTES = 15
+# Partition-key prefixes (ADR 0013) for dynamodb:LeadingKeys (ADR 0017).
+ACCOUNT_PREFIX = "ACCOUNT#"
+STATE_PREFIX = "STATE#"
+# What the planner's push_due names: its keys, the two attributes it sets, and the
+# state its condition reads. Nothing else, so never a token, expiry or lease field.
+PLANNER_ATTRIBUTES = ("PK", "SK", "next_due_at", "version", "state")
 if WORKER_TIMEOUT_SECONDS >= LEASE_SECONDS:  # not an assert: python -O strips those
     raise ValueError("a worker must not outlive its lease (ADR 0015)")
+
+
+def leading_keys(prefix: str) -> dict[str, dict[str, Any]]:
+    """Every partition key the request touches starts with ``prefix``."""
+    return {"ForAllValues:StringLike": {"dynamodb:LeadingKeys": [f"{prefix}*"]}}
 
 
 class TokenKeeperStack(Stack):
@@ -130,10 +146,16 @@ class TokenKeeperStack(Stack):
             ),
         )
 
-        def grant_table(fn: lambda_.Function, *actions: str) -> None:
+        def grant_table(
+            fn: lambda_.Function,
+            *actions: str,
+            conditions: dict[str, dict[str, Any]] | None = None,
+        ) -> None:
             # Table only, never its indexes (see the module docstring).
             fn.add_to_role_policy(
-                iam.PolicyStatement(actions=list(actions), resources=[table.table_arn])
+                iam.PolicyStatement(
+                    actions=list(actions), resources=[table.table_arn], conditions=conditions
+                )
             )
 
         api = apigw.HttpApi(self, "Api", create_default_stage=False)
@@ -208,7 +230,7 @@ class TokenKeeperStack(Stack):
             },
         )
         key.grant(connect, "kms:Encrypt")
-        grant_table(connect, "dynamodb:PutItem")
+        grant_table(connect, "dynamodb:PutItem", conditions=leading_keys(STATE_PREFIX))
         secret_param("CONNECT_LINK_SECRET_PARAM").grant_read(connect)
         github_client_id.grant_read(connect)
         receiver_url.grant_read(connect)
@@ -249,7 +271,7 @@ class TokenKeeperStack(Stack):
                 "WEBHOOK_SECRET_PARAM": SECRET_PARAMS["WEBHOOK_SECRET_PARAM"],
             },
         )
-        grant_table(deliverer, "dynamodb:Query")
+        grant_table(deliverer, "dynamodb:Query", conditions=leading_keys(ACCOUNT_PREFIX))
         secret_param("WEBHOOK_SECRET_PARAM").grant_read(deliverer)
         receiver_url.grant_read(deliverer)
         deliverer.add_event_source(
@@ -269,7 +291,15 @@ class TokenKeeperStack(Stack):
                 actions=["dynamodb:Query"], resources=[f"{table.table_arn}/index/{DUE_INDEX}"]
             )
         )
-        grant_table(planner, "dynamodb:UpdateItem")
+        grant_table(
+            planner,
+            "dynamodb:UpdateItem",
+            conditions={
+                **leading_keys(ACCOUNT_PREFIX),
+                "ForAllValues:StringEquals": {"dynamodb:Attributes": list(PLANNER_ATTRIBUTES)},
+                "StringEqualsIfExists": {"dynamodb:ReturnValues": "NONE"},
+            },
+        )
         sync_queue.grant_send_messages(planner)
         scheduler.Schedule(
             self,
@@ -291,7 +321,12 @@ class TokenKeeperStack(Stack):
             },
         )
         key.grant(worker, "kms:Encrypt", "kms:Decrypt")
-        grant_table(worker, "dynamodb:UpdateItem", "dynamodb:PutItem")
+        grant_table(
+            worker,
+            "dynamodb:UpdateItem",
+            "dynamodb:PutItem",
+            conditions=leading_keys(ACCOUNT_PREFIX),
+        )
         queue.grant_send_messages(worker)
         secret_param("GITHUB_CLIENT_SECRET_PARAM").grant_read(worker)
         github_client_id.grant_read(worker)

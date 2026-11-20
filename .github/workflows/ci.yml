@@ -46,6 +46,53 @@ jobs:
         env:
           BUDGET_EMAIL: ci@example.invalid
 
+  diff:
+    # cdk diff against the deployed stacks, through the read-only OIDC role (spec §9,
+    # ADR 0016). First thing to cut if it fights back (spec §3). Budget and CiRoles are
+    # deployed by hand and left out.
+    name: CDK diff (demo)
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write # the OIDC token for the DiffRole
+      pull-requests: write # the sticky diff comment
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: uv sync --locked
+      - run: scripts/build_lambda.sh
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ secrets.AWS_DIFF_ROLE_ARN }}
+          aws-region: us-east-1
+          mask-aws-account-id: true
+      - name: cdk diff
+        run: |
+          set -o pipefail
+          npx cdk diff DemoReceiver TokenKeeper --no-change-set 2>&1 | tee build/diff.txt
+      - name: Post the diff
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          # Log masking doesn't reach a comment body, so scrub anything account-shaped.
+          {
+            echo "### cdk diff against \`demo\`"
+            echo '```'
+            sed -E 's/[0-9]{12}/<account>/g' build/diff.txt 2>/dev/null | head -c 60000
+            echo '```'
+          } > build/diff.md
+          cat build/diff.md >> "$GITHUB_STEP_SUMMARY"
+          gh pr comment "$PR" --edit-last --create-if-none --body-file build/diff.md
+
   gitleaks:
     name: Secret scan
     runs-on: ubuntu-latest

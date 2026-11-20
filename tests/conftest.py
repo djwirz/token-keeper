@@ -83,6 +83,8 @@ TK_PUBLIC_URL = "http://localhost:8001"
 RECEIVER_WEBHOOK_URL = "http://localhost:8000/webhooks/token-keeper"
 GITHUB_CLIENT_ID = "Iv23-test-client-id"
 GITHUB_CLIENT_SECRET = "test-client-secret-not-real"
+# Split so secret scanners don't flag a fake; 64 characters, like the real one.
+GITHUB_WEBHOOK_SECRET = "test-github-webhook-" + "secret-not-real-" + "0" * 28
 
 
 @dataclass(frozen=True)
@@ -121,6 +123,7 @@ def tk_env(receiver_env: None, monkeypatch: pytest.MonkeyPatch) -> Iterator[Toke
         "TOKEN_KEEPER_PUBLIC_URL": TK_PUBLIC_URL,
         "GITHUB_CLIENT_ID": GITHUB_CLIENT_ID,
         "GITHUB_CLIENT_SECRET": GITHUB_CLIENT_SECRET,
+        "GITHUB_WEBHOOK_SECRET": GITHUB_WEBHOOK_SECRET,
         "RECEIVER_URL": PUBLIC_URL,
     }
     for key, value in env.items():

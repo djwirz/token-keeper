@@ -596,20 +596,43 @@ class Store:
             | {"ExpressionAttributeNames": {"#state": "state"}}
         )
 
-    def mark_needs_reauth_takeover(self, account_id: str, *, reason: str) -> bool:
-        """The "everyone else" write (spec §4), used for revocation (slice 5).
+    def mark_needs_reauth_takeover(
+        self, account_id: str, *, reason: str, delivery: str | None = None
+    ) -> bool:
+        """The "everyone else" write (spec §4), used by the revocation webhook.
 
         Ignores any lease and clears it, so a worker mid-sync fails its final write.
-        False if the account doesn't exist.
+
+        It writes nothing, and returns False, when the account is missing or the write
+        would repeat itself (ADR 0018):
+        - the account is already ``needs_reauth`` for this ``reason``, or
+        - ``delivery`` (GitHub's ``X-GitHub-Delivery`` GUID, which a redelivery keeps)
+          is one this account has already acted on. ``revoked_deliveries`` is a string
+          set of every one, not just the last: after revoke (A), reconnect, revoke (B),
+          reconnect, a redelivery of A must still do nothing (PR 6 review). It grows
+          by one id per real revocation, which is a handful per account at most.
+
+        So a redelivery doesn't bump ``version``. True if it wrote.
         """
         set_clause, values = _needs_reauth_set(reason)
+        condition = "attribute_exists(PK) AND NOT (#state = :reauth AND state_reason = :reason)"
+        add_clause = ""
+        if delivery:
+            add_clause = "ADD revoked_deliveries :delivery_set "
+            # contains() on a missing attribute is false, so a first revocation passes.
+            condition += " AND NOT contains(revoked_deliveries, :delivery)"
+            values = {
+                **values,
+                ":delivery": {"S": delivery},
+                ":delivery_set": {"SS": [delivery]},
+            }
         try:
             self._client.update_item(
                 TableName=self._table,
                 Key=_key(account_pk(account_id)),
                 UpdateExpression=f"SET {set_clause}, version = version + :one "
-                f"REMOVE {_NEEDS_REAUTH_REMOVE}, lease_owner, lease_until",
-                ConditionExpression="attribute_exists(PK)",
+                f"{add_clause}REMOVE {_NEEDS_REAUTH_REMOVE}, lease_owner, lease_until",
+                ConditionExpression=condition,
                 ExpressionAttributeNames={"#state": "state"},
                 ExpressionAttributeValues={**values, ":one": {"N": "1"}},
             )

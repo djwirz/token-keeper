@@ -338,6 +338,13 @@ def test_each_role_has_exactly_what_its_handler_needs(token_keeper: Template) ->
         | {(a, queue) for a in send}
         | ssm(TK_SECRET_PARAMS["GITHUB_CLIENT_SECRET_PARAM"])
         | ssm(GITHUB_CLIENT_ID_PARAM),
+        # Spec §6.4, ADR 0018: read a GitHub link, take over the account, enqueue. No KMS.
+        "token_keeper.handlers.github_webhook.handler": {
+            ("dynamodb:GetItem", table),
+            ("dynamodb:UpdateItem", table),
+        }
+        | {(a, queue) for a in send}
+        | ssm(TK_SECRET_PARAMS["GITHUB_WEBHOOK_SECRET_PARAM"]),
     }
     grants = _grants_by_role(token_keeper)
     scheduler_role = _logical_id(token_keeper, "AWS::IAM::Role", "SchedulerRoleForTarget")
@@ -407,14 +414,14 @@ def test_token_keeper_secrets_are_ssm_names_and_logs_kept_two_weeks(
     token_keeper: Template,
 ) -> None:
     functions = token_keeper.find_resources("AWS::Lambda::Function")
-    assert len(functions) == 5
+    assert len(functions) == 6
     for function in functions.values():
         variables = function["Properties"]["Environment"]["Variables"]
         for param_env in TK_SECRET_PARAMS:
             assert param_env.removesuffix("_PARAM") not in variables
         assert function["Properties"]["Architectures"] == ["arm64"]
     log_groups = token_keeper.find_resources("AWS::Logs::LogGroup")
-    assert len(log_groups) == 5
+    assert len(log_groups) == 6
     assert all(g["Properties"]["RetentionInDays"] == 14 for g in log_groups.values())
 
 
@@ -423,6 +430,7 @@ def test_token_keeper_api_routes_and_throttle(token_keeper: Template) -> None:
     assert {r["Properties"]["RouteKey"] for r in routes.values()} == {
         "GET /connect",
         "GET /callback",
+        "POST /github/webhook",
     }
     token_keeper.has_resource_properties(
         "AWS::ApiGatewayV2::Stage",
@@ -432,6 +440,14 @@ def test_token_keeper_api_routes_and_throttle(token_keeper: Template) -> None:
             )
         },
     )
+
+
+def test_github_webhook_answers_inside_githubs_ten_seconds(token_keeper: Template) -> None:
+    # GitHub records a delivery as failed after 10 s (its "handling failed deliveries" docs).
+    assert _function(token_keeper, "github_webhook")["Properties"]["Timeout"] < 10
+    outputs = token_keeper.to_json()["Outputs"]
+    url = json.dumps(outputs["GitHubWebhookUrl"]["Value"])
+    assert url.endswith('/github/webhook"]]}')
 
 
 def test_deliverer_timeout_covers_its_whole_batch(token_keeper: Template) -> None:
@@ -535,6 +551,11 @@ def test_table_grants_carry_exactly_their_key_and_attribute_conditions(
                 table,
                 _leading_keys("ACCOUNT#"),
             )
+        ],
+        # Two statements: the link it reads and the account it takes over (ADR 0018).
+        "github_webhook": [
+            (frozenset({"dynamodb:GetItem"}), table, _leading_keys("GHUSER#")),
+            (frozenset({"dynamodb:UpdateItem"}), table, _leading_keys("ACCOUNT#")),
         ],
     }
     statements = _table_statements(token_keeper)

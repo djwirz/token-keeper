@@ -3,7 +3,8 @@
     uv run python -m local.run
 
 - Receiver: http://localhost:8000 (status page, webhook endpoint, passcode connect)
-- Token Keeper: http://localhost:8001 (``/connect``, ``/callback``), plus threads that
+- Token Keeper: http://localhost:8001 (``/connect``, ``/callback``, and
+  ``POST /github/webhook`` when ``GITHUB_WEBHOOK_SECRET`` is set), plus threads that
   drain the sync queue into the worker and the delivery queue into the deliverer, as
   Lambda's SQS triggers would, and one that runs the planner every 30 seconds in place
   of EventBridge Scheduler.
@@ -34,7 +35,7 @@ from pathlib import Path
 import boto3
 from moto.server import ThreadedMotoServer
 
-from local.http import make_server, router, serve_in_thread
+from local.http import LambdaHandler, make_server, router, serve_in_thread
 from local.queues import drain_in_thread
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -210,12 +211,26 @@ def start(
             }
         )
         from local.control import control_handler
-        from token_keeper.handlers import _shared, callback, connect, deliverer, worker
+        from token_keeper.handlers import (
+            _shared,
+            callback,
+            connect,
+            deliverer,
+            github_webhook,
+            worker,
+        )
 
         _shared.reset()
-        token_keeper = router(
-            {("GET", "/connect"): connect.handler, ("GET", "/callback"): callback.handler}
-        )
+        routes: dict[tuple[str, str], LambdaHandler] = {
+            ("GET", "/connect"): connect.handler,
+            ("GET", "/callback"): callback.handler,
+        }
+        # Only with the GitHub App's own webhook secret, added by hand: a generated one
+        # could never match what GitHub signs with (a delivery reaches localhost through
+        # a proxy such as smee.io, spec §10).
+        if values.get("GITHUB_WEBHOOK_SECRET"):
+            routes[("POST", "/github/webhook")] = github_webhook.handler
+        token_keeper = router(routes)
         servers.append(make_server(token_keeper, "127.0.0.1", token_keeper_port))
         servers.append(make_server(control_handler(), "127.0.0.1", control_port))
         drains.append(drain_in_thread(os.environ["SYNC_QUEUE_URL"], worker.handler))

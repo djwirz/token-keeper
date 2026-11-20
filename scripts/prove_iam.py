@@ -46,21 +46,23 @@ from token_keeper.store import Store
 
 REGION = "us-east-1"
 STACK = "TokenKeeper"
-HANDLERS = ("connect", "callback", "planner", "worker", "deliverer")
+HANDLERS = ("connect", "callback", "planner", "worker", "deliverer", "github_webhook")
 PROBE = "iam-probe"
+PROBE_GITHUB_USER = 0
 PLANNER_ATTRS = list(PLANNER_ATTRIBUTES)
 
 
 @dataclass(frozen=True)
 class Case:
     handler: str
-    action: str  # PutItem | UpdateItem | Query
+    action: str  # PutItem | UpdateItem | Query | GetItem
     pk: str
     allow: bool
     attrs: tuple[str, ...] = ()  # non-key attributes the request names
     return_values: str | None = None
     index: bool = False
     push_due: bool = False  # the planner's real request (Store.push_due)
+    takeover: bool = False  # the webhook's real request (Store.mark_needs_reauth_takeover)
     note: str = field(default="", compare=False)
 
 
@@ -83,6 +85,13 @@ CASES = [
     Case("planner", "UpdateItem", f"ACCOUNT#{PROBE}", False, ("lease_owner",), note="lease"),
     Case("planner", "UpdateItem", f"ACCOUNT#{PROBE}", False, ("next_due_at",), "ALL_NEW"),
     Case("planner", "UpdateItem", f"LINK#{PROBE}", False, ("next_due_at",), note="other row"),
+    # github_webhook (ADR 0018): reads GHUSER# links, takes over ACCOUNT# rows.
+    Case("github_webhook", "GetItem", f"GHUSER#{PROBE_GITHUB_USER}", True),
+    Case("github_webhook", "UpdateItem", f"ACCOUNT#{PROBE}", True, takeover=True),
+    Case("github_webhook", "GetItem", f"ACCOUNT#{PROBE}", False, note="reading token rows"),
+    Case("github_webhook", "GetItem", f"LINK#{PROBE}", False, note="reading a user link"),
+    Case("github_webhook", "UpdateItem", f"GHUSER#{PROBE}", False, ("account_id",)),
+    Case("github_webhook", "UpdateItem", f"STATE#{PROBE}", False, ("app_id",)),
     # callback: no condition (it writes every prefix); a sanity check that it still works.
     Case("callback", "PutItem", f"LINK#{PROBE}", True, ("account_id",)),
     Case("callback", "UpdateItem", f"ACCOUNT#{PROBE}", True, ("version",)),
@@ -192,6 +201,17 @@ def live_call(ddb: Any, table: str, case: Case) -> bool:
                 TableName=table,
                 KeyConditionExpression="PK = :pk",
                 ExpressionAttributeValues={":pk": {"S": case.pk}},
+            )
+        elif case.action == "GetItem" and case.pk == f"GHUSER#{PROBE_GITHUB_USER}":
+            # The webhook's real lookup. GitHub user ids start at 1, so 0 never exists.
+            Store(table, client=ddb).account_for_github_user(PROBE_GITHUB_USER)
+        elif case.action == "GetItem":
+            ddb.get_item(TableName=table, Key=key, ConsistentRead=True)
+        elif case.takeover:
+            # The webhook's real request. Its condition fails on the missing item, which
+            # the store turns into False; AccessDenied still raises.
+            Store(table, client=ddb).mark_needs_reauth_takeover(
+                PROBE, reason="revoked", delivery="iam-probe-delivery"
             )
         elif case.action == "PutItem":
             item = {**key, **{a: {"S": "x"} for a in case.attrs}}

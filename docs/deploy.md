@@ -52,6 +52,33 @@ Every command below assumes `AWS_PROFILE=token-keeper`, Node 22+, and a fresh La
   ```
 - **`main` is not branch-protected** (no ruleset, no required checks). `deploy.yml` runs on every push to `main` whatever CI's result, so the `demo` approval is the only gate. A ruleset requiring a PR and the "Lint, types, tests", "Lambda build and CDK synth" and "Secret scan" checks would close that; the diff job stays optional, since it's the first thing to cut.
 
+## The revocation webhook (slice 5)
+
+GitHub tells Token Keeper when Dan revokes the App, through `POST /github/webhook` ([ADR 0018](adr/0018-revocation-webhook-redeliveries-and-trust.md)). Once the stack with the `GitHubWebhook` Lambda has deployed through CI:
+
+1. **The secret,** generated, written to SSM and put on the clipboard, never printed:
+   ```bash
+   uv run python scripts/put_demo_secrets.py --profile token-keeper --github-webhook-secret
+   ```
+   It refuses if the parameter exists. With `--overwrite` it makes a new one, and the App's setting must then be pasted again. A warm Lambda keeps the old value, and answers 401 to every real delivery until it's recycled. GitHub never retries, so after an overwrite:
+   - force a cold start: `aws lambda update-function-configuration --function-name "$FN" --description "secret rotated $(date +%F)"`, where `$FN` is the `GitHubWebhook` function's name from the stack's resources;
+   - then press Redeliver on anything that failed in Recent Deliveries.
+2. **The GitHub App:** Settings → Developer settings → GitHub Apps → the App → General → Webhook:
+   - tick **Active**;
+   - set the URL to the `TokenKeeper.GitHubWebhookUrl` stack output;
+   - paste the secret;
+   - save, then copy something else to clear the clipboard.
+
+   The App receives `github_app_authorization` by default and can't unsubscribe from it.
+3. **Check it:** the App's Advanced tab lists Recent Deliveries with our status code. A forged request must get a 401:
+   ```bash
+   URL=$(aws cloudformation describe-stacks --stack-name TokenKeeper --query "Stacks[0].Outputs[?OutputKey=='GitHubWebhookUrl'].OutputValue" --output text)
+   curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'X-GitHub-Event: ping' -H 'X-Hub-Signature-256: sha256=00' -d '{}' "$URL"
+   ```
+4. **Rerun the IAM proof** (below). It has the webhook role's cases.
+
+A redelivery from Recent Deliveries is harmless when the original attempt got a 2xx: it keeps the original delivery GUID, which the account has recorded, so it writes nothing, even after a reconnect. A redelivery of an attempt that failed (a 5xx, or a 401 after a secret change) may never have been recorded. After a reconnect, it revokes the new grant: GitHub's payload has no timestamp to tell a stale revocation from a fresh one. So don't redeliver a failed revocation once Dan has reconnected.
+
 ## Forcing a refresh (proof, not routine)
 
 A real refresh normally waits for the 8-hour access token to come within 10 minutes of expiry. To see one now, make the account due with an expiring token. That's an operator write, and it bumps `version` like every write (ADR 0015):

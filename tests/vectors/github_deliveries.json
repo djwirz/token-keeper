@@ -1,0 +1,50 @@
+{
+  "_comment": "GitHub App webhook deliveries for tests/test_github_webhook.py. Shapes follow GitHub's docs (webhook-events-and-payloads: delivery headers, github_app_authorization, ping) and Octokit's webhook schema (action 'revoked'); ids and logins are synthetic. Signatures are computed by the tests with a test secret. The signature vector is GitHub's own published example (validating-webhook-deliveries). Check these against a real delivery from the App's Recent Deliveries after the live run.",
+  "signature_vector": {
+    "source": "https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries",
+    "secret": "It's a Secret to Everybody",
+    "payload": "Hello, World!",
+    "header": "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17"
+  },
+  "github_app_authorization": {
+    "headers": {
+      "Accept": "*/*",
+      "Content-Type": "application/json",
+      "User-Agent": "GitHub-Hookshot/0000000",
+      "X-GitHub-Delivery": "0d6f4b80-0000-11ef-8000-000000000001",
+      "X-GitHub-Event": "github_app_authorization",
+      "X-GitHub-Hook-ID": "100000001",
+      "X-GitHub-Hook-Installation-Target-ID": "200000001",
+      "X-GitHub-Hook-Installation-Target-Type": "integration"
+    },
+    "body": {
+      "action": "revoked",
+      "sender": {
+        "login": "octo-demo",
+        "id": 1234,
+        "node_id": "MDQ6VXNlcjEyMzQ=",
+        "avatar_url": "https://avatars.githubusercontent.com/u/1234?v=4",
+        "type": "User",
+        "site_admin": false
+      }
+    }
+  },
+  "ping": {
+    "headers": {
+      "Accept": "*/*",
+      "Content-Type": "application/json",
+      "User-Agent": "GitHub-Hookshot/0000000",
+      "X-GitHub-Delivery": "0d6f4b80-0000-11ef-8000-000000000002",
+      "X-GitHub-Event": "ping",
+      "X-GitHub-Hook-ID": "100000001",
+      "X-GitHub-Hook-Installation-Target-ID": "200000001",
+      "X-GitHub-Hook-Installation-Target-Type": "integration"
+    },
+    "body": {
+      "zen": "Keep it logically awesome.",
+      "hook_id": 100000001,
+      "hook": {"type": "App", "id": 100000001, "app_id": 200000001, "active": true, "events": []},
+      "sender": {"login": "octo-demo", "id": 1234, "type": "User"}
+    }
+  }
+}

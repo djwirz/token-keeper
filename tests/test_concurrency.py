@@ -30,8 +30,10 @@ from tests.github_fakes import (
 from tests.tk_flow import (
     account_item,
     connect_and_callback,
+    github_delivery,
     message_bodies,
     purge,
+    run_github_webhook,
     run_worker,
     set_numbers,
     snapshot_of,
@@ -168,8 +170,8 @@ def test_takeover_mid_sync_wins(
     set_numbers(account_id, access_expires_at=int(time.time()) + 3600)  # no refresh
 
     def revoked_during_sync(request: httpx.Request) -> httpx.Response:
-        # The revocation webhook's takeover write (slice 5) lands while A is syncing.
-        assert Store(TK_TABLE).mark_needs_reauth_takeover(account_id, reason="revoked")
+        # GitHub's revocation delivery lands while A is syncing (spec §4 takeover).
+        assert run_github_webhook(github_delivery()) == 204
         return httpx.Response(200, json=user_body())
 
     user.side_effect = revoked_during_sync
@@ -179,8 +181,8 @@ def test_takeover_mid_sync_wins(
     _assert_revoked_with_no_tokens(account_id)
     # A's snapshot was discarded with its final write: still the connect-time one.
     assert snapshot_of(account_id)["recent_events"] == []
-    # A sent no event; the takeover writer sends its own (slice 5).
-    assert message_bodies(tk_env.queue_url) == []
+    # A sent no event; the one event is the webhook's.
+    assert [m["type"] for m in message_bodies(tk_env.queue_url)] == ["account.updated"]
 
 
 def test_takeover_mid_refresh_discards_the_rotated_pair(
@@ -189,7 +191,7 @@ def test_takeover_mid_refresh_discards_the_rotated_pair(
     account_id, token, user = setup
 
     def revoked_during_refresh(request: httpx.Request) -> httpx.Response:
-        assert Store(TK_TABLE).mark_needs_reauth_takeover(account_id, reason="revoked")
+        assert run_github_webhook(github_delivery()) == 204
         return httpx.Response(200, json=token_body(ROTATED_ACCESS_TOKEN, ROTATED_REFRESH_TOKEN))
 
     token.side_effect = revoked_during_refresh

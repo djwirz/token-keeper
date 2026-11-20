@@ -23,7 +23,7 @@ from tests.github_fakes import (
     token_body,
     user_body,
 )
-from tests.tk_flow import connect_and_callback, drain
+from tests.tk_flow import connect_and_callback, drain, github_delivery, run_github_webhook
 from token_keeper import log
 from token_keeper.handlers import worker
 
@@ -107,6 +107,8 @@ def test_whole_flow_logs_no_tokens(
             httpx.Response(200, json=user_body()),
         ]
         assert drain_once(tk_env.sync_queue_url, worker.handler, wait_seconds=0) == 2
+        # Then GitHub's revocation delivery deletes the tokens (slice 5).
+        assert run_github_webhook(github_delivery()) == 204
         drain(tk_env.queue_url)
 
     out = capsys.readouterr()
@@ -114,6 +116,7 @@ def test_whole_flow_logs_no_tokens(
     assert "callback.connected" in emitted and "delivery.succeeded" in emitted
     assert emitted.count('"message":"refresh.succeeded"') == 1
     assert emitted.count('"message":"sync.succeeded"') == 2
+    assert '"message":"github_webhook.revoked"' in emitted
     assert '"sync.error"' not in emitted and '"message":"sync.error"' not in emitted
     # Third-party DEBUG output really is in the capture, KMS bodies included.
     assert '"name":"botocore' in emitted and "Plaintext" in emitted

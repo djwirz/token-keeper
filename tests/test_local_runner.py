@@ -18,6 +18,7 @@ import respx
 from local import run
 from local.send_event import send, synthetic_event
 from receiver import config, handler
+from tests.conftest import GITHUB_WEBHOOK_SECRET
 from tests.github_fakes import (
     ROTATED_ACCESS_TOKEN,
     ROTATED_REFRESH_TOKEN,
@@ -25,6 +26,7 @@ from tests.github_fakes import (
     mock_github,
     token_body,
 )
+from tests.tk_flow import github_delivery
 from token_keeper.handlers import _shared, deliverer
 
 
@@ -61,7 +63,10 @@ def runner(tmp_path: Path) -> Iterator[run.Running]:
 @pytest.fixture
 def runner_with_github(tmp_path: Path) -> Iterator[run.Running]:
     env_file = tmp_path / ".env.local"
-    env_file.write_text("GITHUB_CLIENT_ID=Iv23-test\nGITHUB_CLIENT_SECRET=test-not-real\n")
+    env_file.write_text(
+        "GITHUB_CLIENT_ID=Iv23-test\nGITHUB_CLIENT_SECRET=test-not-real\n"
+        f"GITHUB_WEBHOOK_SECRET={GITHUB_WEBHOOK_SECRET}\n"
+    )
     yield from _start(env_file)
 
 
@@ -172,6 +177,21 @@ def test_connect_flow_end_to_end(runner_with_github: run.Running, tmp_path: Path
         assert _wait_for(lambda: token_route.call_count == 2)
         sent = parse_qs(token_route.calls.last.request.content.decode())
         assert sent["grant_type"] == ["refresh_token"]
+
+        # GitHub's revocation delivery flips the card (slice 5).
+        delivery = github_delivery()
+        assert runner_with_github.token_keeper_url
+        revoke = urllib.request.Request(  # noqa: S310 (local http URL)
+            runner_with_github.token_keeper_url + "/github/webhook",
+            data=delivery["body"].encode(),
+            headers=delivery["headers"],
+            method="POST",
+        )
+        with urllib.request.urlopen(revoke, timeout=5) as response:  # noqa: S310
+            assert response.status == 204
+        assert _wait_for(
+            lambda: "Needs re-auth (revoked)" in _page(runner_with_github.receiver_url)
+        )
 
 
 def test_access_log_never_prints_query_strings(

@@ -60,7 +60,9 @@ GitHub tells Token Keeper when Dan revokes the App, through `POST /github/webhoo
    ```bash
    uv run python scripts/put_demo_secrets.py --profile token-keeper --github-webhook-secret
    ```
-   It refuses if the parameter exists. With `--overwrite` it makes a new one, and the App's setting must then be pasted again. A running Lambda keeps the old value until its next cold start.
+   It refuses if the parameter exists. With `--overwrite` it makes a new one, and the App's setting must then be pasted again. A warm Lambda keeps the old value, and answers 401 to every real delivery until it's recycled. GitHub never retries, so after an overwrite:
+   - force a cold start: `aws lambda update-function-configuration --function-name "$FN" --description "secret rotated $(date +%F)"`, where `$FN` is the `GitHubWebhook` function's name from the stack's resources;
+   - then press Redeliver on anything that failed in Recent Deliveries.
 2. **The GitHub App:** Settings → Developer settings → GitHub Apps → the App → General → Webhook:
    - tick **Active**;
    - set the URL to the `TokenKeeper.GitHubWebhookUrl` stack output;
@@ -70,11 +72,12 @@ GitHub tells Token Keeper when Dan revokes the App, through `POST /github/webhoo
    The App receives `github_app_authorization` by default and can't unsubscribe from it.
 3. **Check it:** the App's Advanced tab lists Recent Deliveries with our status code. A forged request must get a 401:
    ```bash
+   URL=$(aws cloudformation describe-stacks --stack-name TokenKeeper --query "Stacks[0].Outputs[?OutputKey=='GitHubWebhookUrl'].OutputValue" --output text)
    curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'X-GitHub-Event: ping' -H 'X-Hub-Signature-256: sha256=00' -d '{}' "$URL"
    ```
 4. **Rerun the IAM proof** (below). It has the webhook role's cases.
 
-A redelivery from Recent Deliveries is safe at any time: it keeps the original delivery GUID, so it writes nothing, even after a reconnect.
+A redelivery from Recent Deliveries is harmless when the original attempt got a 2xx: it keeps the original delivery GUID, which the account has recorded, so it writes nothing, even after a reconnect. A redelivery of an attempt that failed (a 5xx, or a 401 after a secret change) may never have been recorded. After a reconnect, it revokes the new grant: GitHub's payload has no timestamp to tell a stale revocation from a fresh one. So don't redeliver a failed revocation once Dan has reconnected.
 
 ## Forcing a refresh (proof, not routine)
 

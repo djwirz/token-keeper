@@ -84,7 +84,7 @@ Rationale and alternatives: [ADR 0004](adr/0004-planner-sqs-worker-schedule.md).
 Every change to an Account item is a conditional write that bumps `version`, the planner's push and the lease included, so versions can skip numbers. There are two kinds of writer:
 
 - **The worker** takes a lease with a conditional update: `(attribute_not_exists(lease_until) OR lease_until < :now) AND state = active`, setting `lease_owner` and `lease_until` (60 seconds), with `ReturnValues=ALL_NEW`. It uses **only the tokens returned by that update**, never anything it read before, and re-checks expiry against them. A refreshed pair is written (conditional on `lease_owner = :me`) before it's used. Its final write is conditional on `lease_owner = :me`, and clears the lease. Its Lambda timeout (40 seconds) is below the lease, and it starts no token call with under 20 seconds of lease left ([ADR 0015](adr/0015-sync-worker-failures-and-lease-budget.md)).
-- **Everyone else** (the callback on reconnect, the github-webhook on revocation) takes over: their write clears `lease_owner` and `lease_until` unconditionally and bumps `version`. A worker that was mid-sync then fails its final write, discards whatever it holds (including a freshly rotated pair, which belongs to a grant that's been replaced or revoked), and logs `lease_lost`. The revocation's takeover writes nothing when it would repeat itself: the account is already `needs_reauth` for `revoked`, or it already recorded this delivery's GUID ([ADR 0018](adr/0018-revocation-webhook-redeliveries-and-trust.md)).
+- **Everyone else** (the callback on reconnect, the github-webhook on revocation) takes over: their write clears `lease_owner` and `lease_until` unconditionally and bumps `version`. A worker that was mid-sync then fails its final write, discards whatever it holds (including a freshly rotated pair, which belongs to a grant that's been replaced or revoked), and logs `lease_lost`. The revocation's takeover writes nothing when it would repeat itself: the account is already `needs_reauth` for `revoked`, or it already acted on this delivery's GUID ([ADR 0018](adr/0018-revocation-webhook-redeliveries-and-trust.md)).
 
 ### Data model (DynamoDB, single table, on-demand)
 | Item | Key | Notable attributes |
@@ -166,7 +166,7 @@ Body: always the **full current state**, read when the event is sent (not when i
 - A missing or bad signature gets 401, and nothing is parsed. A signed but malformed body gets 400.
 - Unknown users and other event types get 204 and a log line.
 - An unexpected error gets 500. GitHub never redelivers on its own, so that only shows in the App's Recent Deliveries.
-- Redeliveries keep the original `X-GitHub-Delivery` GUID. A repeat writes nothing, even after a reconnect, and its event carries an unchanged `version` the receiver ignores.
+- Redeliveries keep the original `X-GitHub-Delivery` GUID, and the account records every GUID it acted on. A repeat of one that succeeded writes nothing, even after a reconnect, and its event carries an unchanged `version` the receiver ignores. A failed attempt was never recorded, so redelivering it after a reconnect would revoke the new grant (ADR 0018).
 
 See [ADR 0010](adr/0010-github-revocation-webhook.md) and [ADR 0018](adr/0018-revocation-webhook-redeliveries-and-trust.md).
 

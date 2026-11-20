@@ -198,6 +198,30 @@ def test_a_second_real_revocation_after_a_reconnect_flips_it_again(
     assert account_item(account)["state_reason"] == {"S": "revoked"}
 
 
+def test_an_older_delivery_redelivered_after_two_cycles_is_still_harmless(
+    account: str, tk_env: TokenKeeperEnv
+) -> None:
+    """Revoke (A), reconnect, revoke (B), reconnect, then Redeliver A (PR 6 review).
+
+    Remembering only the last delivery let A through and revoked a working grant.
+    """
+    a = github_delivery()
+    b = github_delivery(headers={"X-GitHub-Delivery": "0d6f4b80-0000-11ef-8000-0000000000bb"})
+    assert run_github_webhook(a) == 204
+    connect_and_callback()
+    assert run_github_webhook(b) == 204
+    assert account_item(account)["state"] == {"S": "needs_reauth"}
+    connect_and_callback()
+    version = _version(account)
+
+    for redelivered in (a, b):
+        assert run_github_webhook(redelivered) == 204
+        item = account_item(account)
+        assert item["state"] == {"S": "active"}
+        assert set(item) >= TOKEN_FIELDS
+    assert _version(account) == version
+
+
 def test_a_revocation_replaces_another_needs_reauth_reason(account: str) -> None:
     assert Store(TK_TABLE).mark_needs_reauth_takeover(account, reason="refresh_rejected")
     before = _version(account)
@@ -305,7 +329,26 @@ def test_a_revocation_body_under_another_event_name_is_ignored(
 def test_nothing_from_the_body_is_logged(account: str, capsys: pytest.CaptureFixture[str]) -> None:
     run_github_webhook(github_delivery())
     out = capsys.readouterr().out
-    assert "octo-demo" not in out and "avatars" not in out
+    assert "github_webhook.revoked" in out
+    # The sender's login, avatar, node id and the payload's own keys.
+    for marker in ("octo-demo", "avatars", "MDQ6VXNlcjEyMzQ", '"sender"', "site_admin"):
+        assert marker not in out, marker
+
+
+def test_an_undecodable_base64_body_gets_401(account: str, tk_env: TokenKeeperEnv) -> None:
+    version = _version(account)
+    event = github_delivery()
+    event["body"], event["isBase64Encoded"] = "not base64!", True
+    assert run_github_webhook(event) == 401
+    _assert_untouched(account, version, tk_env)
+
+
+def test_a_delivery_id_with_a_trailing_newline_is_not_recorded(account: str) -> None:
+    # fullmatch, not match: "$" in re.match accepts a trailing newline.
+    event = github_delivery()
+    event["headers"]["x-github-delivery"] += "\n"
+    assert run_github_webhook(event) == 204
+    assert "revoked_deliveries" not in account_item(account)
 
 
 def test_no_table_rows_appear_for_ignored_deliveries(tk_env: TokenKeeperEnv) -> None:

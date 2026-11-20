@@ -607,25 +607,31 @@ class Store:
         would repeat itself (ADR 0018):
         - the account is already ``needs_reauth`` for this ``reason``, or
         - ``delivery`` (GitHub's ``X-GitHub-Delivery`` GUID, which a redelivery keeps)
-          is the one this account last recorded. That stops a manual redelivery after
-          a reconnect from revoking the new, good grant.
+          is one this account has already acted on. ``revoked_deliveries`` is a string
+          set of every one, not just the last: after revoke (A), reconnect, revoke (B),
+          reconnect, a redelivery of A must still do nothing (PR 6 review). It grows
+          by one id per real revocation, which is a handful per account at most.
 
         So a redelivery doesn't bump ``version``. True if it wrote.
         """
         set_clause, values = _needs_reauth_set(reason)
         condition = "attribute_exists(PK) AND NOT (#state = :reauth AND state_reason = :reason)"
+        add_clause = ""
         if delivery:
-            set_clause += ", revoked_delivery = :delivery"
-            condition += (
-                " AND (attribute_not_exists(revoked_delivery) OR revoked_delivery <> :delivery)"
-            )
-            values = {**values, ":delivery": {"S": delivery}}
+            add_clause = "ADD revoked_deliveries :delivery_set "
+            # contains() on a missing attribute is false, so a first revocation passes.
+            condition += " AND NOT contains(revoked_deliveries, :delivery)"
+            values = {
+                **values,
+                ":delivery": {"S": delivery},
+                ":delivery_set": {"SS": [delivery]},
+            }
         try:
             self._client.update_item(
                 TableName=self._table,
                 Key=_key(account_pk(account_id)),
                 UpdateExpression=f"SET {set_clause}, version = version + :one "
-                f"REMOVE {_NEEDS_REAUTH_REMOVE}, lease_owner, lease_until",
+                f"{add_clause}REMOVE {_NEEDS_REAUTH_REMOVE}, lease_owner, lease_until",
                 ConditionExpression=condition,
                 ExpressionAttributeNames={"#state": "state"},
                 ExpressionAttributeValues={**values, ":one": {"N": "1"}},

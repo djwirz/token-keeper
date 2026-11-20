@@ -84,11 +84,19 @@ def put_github_webhook_secret(ssm: Any, *, overwrite: bool) -> None:
     if exists(ssm, name) and not overwrite:
         sys.exit(f"Already set (nothing written; use --overwrite): {name}")
     value = secrets.token_hex(32)
+    # Clipboard first: if pbcopy failed after the write, SSM would hold a secret nobody
+    # has, and a rerun would refuse without --overwrite (PR 6 review).
+    try:
+        to_clipboard(value)
+    except (OSError, subprocess.CalledProcessError):
+        sys.exit("pbcopy failed: nothing written")
     try:
         ssm.put_parameter(Name=name, Value=value, Type="SecureString", Overwrite=True)
     except ClientError as exc:
-        sys.exit(f"failed writing {name}: {exc.response['Error']['Code']}")
-    to_clipboard(value)
+        sys.exit(
+            f"failed writing {name}: {exc.response['Error']['Code']}. Nothing was stored; "
+            "the clipboard holds an unused value."
+        )
     print(f"wrote {name} (SecureString)")
     print(
         "The secret is on your clipboard. Paste it into the GitHub App's settings, "

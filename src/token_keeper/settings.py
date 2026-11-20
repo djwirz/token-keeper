@@ -74,7 +74,9 @@ class Settings:
     def github_webhook_secret(self) -> str:
         value = env_or_ssm("GITHUB_WEBHOOK_SECRET")
         if len(value) < MIN_GITHUB_WEBHOOK_SECRET_CHARS:
-            # Fail at cold start, not by rejecting every delivery as forged.
+            # Read on the first delivery after a cold start, not at init: a short secret
+            # fails every delivery with a 500 and this message in the log, rather than
+            # a 401 that looks like forgery.
             raise ValueError("GitHub webhook secret is too short")
         return value
 

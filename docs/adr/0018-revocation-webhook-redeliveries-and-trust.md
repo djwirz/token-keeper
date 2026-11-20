@@ -22,10 +22,10 @@ For the event name: trust the header alone, or require the signed body to agree 
 ## Decision
 Option 2, plus these rules:
 
-- **The takeover is conditional.** It writes only when the account exists and is not already `needs_reauth` for `revoked`, *and* this delivery's GUID isn't the one it last recorded (`revoked_delivery`). It records the GUID when it writes. A revocation that lands on another `needs_reauth` reason (say `refresh_rejected`) still writes `revoked`: GitHub knows better than our guess.
+- **The takeover is conditional.** It writes only when the account exists and is not already `needs_reauth` for `revoked`, *and* it hasn't acted on this delivery's GUID before (`revoked_deliveries`, a string set). It adds the GUID when it writes. A revocation that lands on another `needs_reauth` reason (say `refresh_rejected`) still writes `revoked`: GitHub knows better than our guess.
 - **An event is enqueued even when nothing was written.** The deliverer sends the current state, so the receiver sees an equal version and keeps what it had. If the first attempt's SQS send failed (a 5xx back to GitHub), a redelivery is how that event is sent at all.
 - **The signed body has to agree with the header.** The handler acts only if `X-GitHub-Event` is `github_app_authorization` *and* the body's `action` is `revoked` *and* `sender.id` is an integer. A signed body from another event, such as a `ping` (which also carries a `sender`), can't be replayed under a revocation's event name. GitHub's docs don't list the `action` value for this event; Octokit's schema says `revoked`. The first real delivery settles it.
-- **Order and answers.** Verify the signature first (constant-time compare over the raw body, as GitHub's docs ask), then parse. A missing or bad signature gets 401 and nothing is parsed. A signed body that's malformed gets 400. Unknown users, other events and no-op repeats get 204 with a log line. An unexpected error gets 500, which shows as a failure in Recent Deliveries. The Lambda timeout is 8 seconds, under GitHub's 10.
+- **Order and answers.** Verify the signature first (constant-time compare over the raw body, as GitHub's docs ask), then parse. A missing or bad signature, or a body that can't be decoded to verify, gets 401, and nothing is parsed. A signed body that's malformed gets 400. Unknown users, other events and no-op repeats get 204 with a log line. An unexpected error gets 500, which shows as a failure in Recent Deliveries. The Lambda timeout is 8 seconds, under GitHub's 10.
 - **IAM:**
 
   | Role | Actions | Condition |
@@ -39,7 +39,8 @@ Option 2, plus these rules:
 - **Proving it live without a laptop deploy.** The PR merges on local tests, CI deploys it with Dan's approval (ADR 0016), and the live revocation runs afterwards. Fixes, and the record of what the live run showed, go in a small follow-up PR.
 
 ## Consequences
-- A redelivery is a no-op, before or after a reconnect, and `version` moves only when the state does. A fresh revocation after a reconnect still flips the card: it has a new GUID.
+- A redelivery of a delivery that was acted on is a no-op, before or after any number of reconnects, and `version` moves only when the state does. The GUIDs are kept as a string set (`revoked_deliveries`), not just the last one: the PR 6 review found that keeping one let an older delivery through after two revoke-and-reconnect cycles. A fresh revocation after a reconnect still flips the card, because it has a new GUID.
+- **A stated limitation: a failed attempt isn't recorded.** If the first attempt failed before its write (a 5xx), or its GUID didn't look like one, nothing was recorded. Redelivering it after a reconnect revokes the new grant. The payload carries no timestamp, so code can't tell that apart from a fresh revocation. `docs/deploy.md` says not to redeliver a failed revocation once Dan has reconnected.
 - **The GUID guard depends on GitHub keeping the GUID on redelivery.** GitHub's best-practices page says it does, and the live run checks it by redelivering after a reconnect.
 - **A stated limitation: replay.** GitHub's signature carries no timestamp, and the GUID is an unsigned header. Someone who captured a real delivery could replay the body with a new GUID and force a re-auth. That's the worst case spec §9 already accepts. They can't read or write a token.
 - **A stated limitation: a dropped delivery** is caught only by the next sync's 401, as `unauthorized` rather than `revoked` (ADR 0010).

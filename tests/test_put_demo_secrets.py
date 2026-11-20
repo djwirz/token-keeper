@@ -81,3 +81,16 @@ def test_refuses_to_replace_one_without_overwrite(
     script.put_github_webhook_secret(ssm, overwrite=True)
     second = ssm.get_parameter(Name=NAME, WithDecryption=True)["Parameter"]["Value"]
     assert second != first and clipboard == [first, second]
+
+
+def test_a_failed_clipboard_writes_nothing(
+    ssm: Any, script: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Otherwise SSM would hold a secret nobody has, and a rerun would refuse (PR 6 review).
+    def broken(value: str) -> None:
+        raise OSError("pbcopy not found")
+
+    monkeypatch.setattr(script, "to_clipboard", broken)
+    with pytest.raises(SystemExit):
+        script.put_github_webhook_secret(ssm, overwrite=False)
+    assert not script.exists(ssm, NAME)

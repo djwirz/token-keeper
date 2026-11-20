@@ -33,7 +33,7 @@ from token_keeper.handlers._shared import store
 REVOCATION_EVENT = "github_app_authorization"
 REVOKED = "revoked"
 # GitHub's delivery GUIDs; anything else isn't stored or logged.
-_GUID = re.compile(r"^[0-9a-fA-F-]{8,64}$")
+_GUID = re.compile(r"[0-9a-fA-F-]{8,64}")
 
 Response = dict[str, Any]
 
@@ -82,7 +82,7 @@ def handler(event: dict[str, Any], context: object) -> Response:
     logger = log.start(handler="github_webhook", correlation_id=correlation_id)
     headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
     guid = headers.get("x-github-delivery") or ""
-    guid = guid if _GUID.match(guid) else None
+    guid = guid if _GUID.fullmatch(guid) else None
     event_name = github.safe_code(headers.get("x-github-event"))
     log.add_keys(github_delivery=guid, github_event=event_name)
 
@@ -95,8 +95,10 @@ def handler(event: dict[str, Any], context: object) -> Response:
         logger.info("github_webhook.rejected", extra={"reason": exc.reason})
         return _empty(401)
     except _BadRequest as exc:
+        # A body that can't be decoded can't be verified either: 401, as for a bad
+        # signature (spec §6.4), not 400 (PR 6 review).
         logger.info("github_webhook.rejected", extra={"reason": exc.reason})
-        return _empty(400)
+        return _empty(401)
 
     # Signed by GitHub from here on (the body, not the headers).
     try:

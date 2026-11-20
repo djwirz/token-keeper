@@ -71,3 +71,87 @@ def queue_messages(queue_url: str) -> list[Any]:
         )
         .get("Messages", [])
     )
+
+
+# Sync helpers (slice 3) --------------------------------------------------------
+
+
+def account_item(account_id: str) -> dict[str, Any]:
+    from tests.conftest import TK_TABLE
+
+    item = boto3.client("dynamodb").get_item(
+        TableName=TK_TABLE,
+        Key={"PK": {"S": f"ACCOUNT#{account_id}"}, "SK": {"S": "META"}},
+        ConsistentRead=True,
+    )["Item"]
+    return dict(item)
+
+
+def snapshot_of(account_id: str) -> dict[str, Any]:
+    import json
+
+    from tests.conftest import TK_TABLE
+
+    item = boto3.client("dynamodb").get_item(
+        TableName=TK_TABLE,
+        Key={"PK": {"S": f"ACCOUNT#{account_id}"}, "SK": {"S": "SNAPSHOT"}},
+        ConsistentRead=True,
+    )["Item"]
+    snapshot: dict[str, Any] = json.loads(item["snapshot"]["S"])
+    return snapshot
+
+
+def set_numbers(account_id: str, **values: int) -> None:
+    """Overwrite Number attributes on an Account (times, mostly) for a test."""
+    from tests.conftest import TK_TABLE
+
+    names = {f"#{k}": k for k in values}
+    boto3.client("dynamodb").update_item(
+        TableName=TK_TABLE,
+        Key={"PK": {"S": f"ACCOUNT#{account_id}"}, "SK": {"S": "META"}},
+        UpdateExpression="SET " + ", ".join(f"#{k} = :{k}" for k in values),
+        ExpressionAttributeNames=names,
+        ExpressionAttributeValues={f":{k}": {"N": str(v)} for k, v in values.items()},
+    )
+
+
+def stored_tokens(account_id: str) -> tuple[str, str]:
+    """Decrypt the stored pair, as only the worker and callback roles could."""
+    from token_keeper import crypto
+    from token_keeper.handlers import _shared
+
+    item = account_item(account_id)
+    context = crypto.account_context(account_id)
+    kms = _shared.crypto()
+    return (
+        kms.decrypt(bytes(item["access_token_ct"]["B"]), context),
+        kms.decrypt(bytes(item["refresh_token_ct"]["B"]), context),
+    )
+
+
+def sync_record(account_id: str, message_id: str = "m-1") -> dict[str, Any]:
+    import json
+
+    return {
+        "messageId": message_id,
+        "receiptHandle": "rh",
+        "body": json.dumps({"account_id": account_id}),
+        "attributes": {"ApproximateReceiveCount": "1"},
+        "messageAttributes": {"correlation_id": {"stringValue": "cor_test", "dataType": "String"}},
+    }
+
+
+def run_worker(account_id: str) -> dict[str, Any]:
+    from token_keeper.handlers import worker
+
+    return worker.handler({"Records": [sync_record(account_id)]}, None)
+
+
+def purge(queue_url: str) -> None:
+    boto3.client("sqs").purge_queue(QueueUrl=queue_url)
+
+
+def message_bodies(queue_url: str) -> list[dict[str, Any]]:
+    import json
+
+    return [json.loads(m["Body"]) for m in queue_messages(queue_url)]

@@ -2,7 +2,7 @@
 
 Keeps third-party account connections alive: stores OAuth tokens, refreshes or re-verifies them on a schedule, and reports each account's state to a main app through one signed endpoint. First provider: GitHub.
 
-**Status:** building, slice 2 of 7. Design: [docs/spec.md](docs/spec.md) and [docs/adr/](docs/adr/).
+**Status:** building, slice 3 of 7. Design: [docs/spec.md](docs/spec.md) and [docs/adr/](docs/adr/).
 
 ## Run it locally
 
@@ -24,7 +24,7 @@ uv sync
 uv run python -m local.run
 ```
 
-Open http://localhost:8000, enter the demo passcode (in `.env.local`) and approve the app on GitHub. You come back to the status page with `?result=connected`, and your profile appears once the deliverer has posted `account.connected` (a second or so). Token Keeper runs on :8001; without the GitHub App values only the receiver starts. Data lives in memory and is gone when the runner stops.
+Open http://localhost:8000, enter the demo passcode (in `.env.local`) and approve the app on GitHub. You come back to the status page with `?result=connected`, and your profile appears once the deliverer has posted `account.connected` (a second or so). The callback also enqueues an immediate sync, so your recent public activity follows a moment later. The runner runs the planner every 30 seconds in place of the 15-minute schedule. To force a real refresh-token rotation without waiting 8 hours, `curl -X POST http://127.0.0.1:8002/expire`: it marks access tokens as expired and runs the planner, so the next sync refreshes against GitHub. Token Keeper runs on :8001; without the GitHub App values only the receiver starts. Data lives in memory and is gone when the runner stops.
 
 To send signed synthetic events straight to the receiver instead:
 

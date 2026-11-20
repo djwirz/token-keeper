@@ -90,6 +90,7 @@ class TokenKeeperEnv:
     queue_url: str
     dlq_url: str
     key_id: str
+    sync_queue_url: str
 
 
 @pytest.fixture
@@ -97,22 +98,26 @@ def tk_env(receiver_env: None, monkeypatch: pytest.MonkeyPatch) -> Iterator[Toke
     """Token Keeper's table, key and queues on moto, inside receiver_env's mock_aws."""
     from token_keeper.handlers import _shared, deliverer
     from token_keeper.store import ATTRIBUTE_DEFINITIONS as TK_ATTRS
+    from token_keeper.store import GLOBAL_SECONDARY_INDEXES as TK_GSIS
     from token_keeper.store import KEY_SCHEMA as TK_KEYS
 
     boto3.client("dynamodb").create_table(
         TableName=TK_TABLE,
         KeySchema=TK_KEYS,  # type: ignore[arg-type]
         AttributeDefinitions=TK_ATTRS,  # type: ignore[arg-type]
+        GlobalSecondaryIndexes=TK_GSIS,  # type: ignore[arg-type]
         BillingMode="PAY_PER_REQUEST",
     )
     key_id = boto3.client("kms").create_key()["KeyMetadata"]["KeyId"]
     sqs = boto3.client("sqs")
     dlq_url = sqs.create_queue(QueueName="delivery-dlq")["QueueUrl"]
     queue_url = sqs.create_queue(QueueName="delivery")["QueueUrl"]
+    sync_queue_url = sqs.create_queue(QueueName="sync")["QueueUrl"]
     env = {
         "TOKEN_KEEPER_TABLE": TK_TABLE,
         "KMS_KEY_ID": key_id,
         "DELIVERY_QUEUE_URL": queue_url,
+        "SYNC_QUEUE_URL": sync_queue_url,
         "TOKEN_KEEPER_PUBLIC_URL": TK_PUBLIC_URL,
         "GITHUB_CLIENT_ID": GITHUB_CLIENT_ID,
         "GITHUB_CLIENT_SECRET": GITHUB_CLIENT_SECRET,
@@ -122,6 +127,8 @@ def tk_env(receiver_env: None, monkeypatch: pytest.MonkeyPatch) -> Iterator[Toke
         monkeypatch.setenv(key, value)
     _shared.reset()
     deliverer._sqs.cache_clear()
-    yield TokenKeeperEnv(queue_url=queue_url, dlq_url=dlq_url, key_id=key_id)
+    yield TokenKeeperEnv(
+        queue_url=queue_url, dlq_url=dlq_url, key_id=key_id, sync_queue_url=sync_queue_url
+    )
     _shared.reset()
     deliverer._sqs.cache_clear()

@@ -1,4 +1,5 @@
-"""The GitHub calls this slice needs (spec §5): authorize, code exchange, ``GET /user``.
+"""The GitHub calls Token Keeper makes (spec §5): authorize, code exchange, refresh,
+``GET /user`` and ``GET /users/{login}/events/public``.
 
 Token-endpoint calls send ``Accept: application/json`` and treat an ``error`` field in
 the body as the failure, whatever the HTTP status: GitHub answers most token errors
@@ -11,7 +12,7 @@ import re
 from dataclasses import dataclass
 from functools import cache
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -23,11 +24,31 @@ _SAFE_CODE = re.compile(r"^[a-z_]{1,64}$")
 
 
 class GitHubError(Exception):
-    """A GitHub call failed. ``reason`` is a short code that is safe to log."""
+    """A GitHub call failed. ``reason`` is a short code that is safe to log.
+
+    The base class is transient (5xx, timeouts, odd responses): it never changes an
+    account's state (spec §7). The subclasses below are the ones that can.
+    """
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+class RefreshRejected(GitHubError):
+    """``bad_refresh_token``: the refresh token is dead (used, revoked or expired)."""
+
+
+class Unauthorized(GitHubError):
+    """A 401 from the API: the access token no longer works."""
+
+
+class RateLimited(GitHubError):
+    """A 403 or 429 with rate-limit headers. ``reset_at`` is when to try again."""
+
+    def __init__(self, reason: str, reset_at: int) -> None:
+        super().__init__(reason)
+        self.reset_at = reset_at
 
 
 def safe_code(value: object) -> str:
@@ -76,7 +97,10 @@ def authorize_url(client_id: str, redirect_uri: str, state: str, code_challenge:
 
 def _token_pair(body: dict[str, Any], now: int) -> TokenPair:
     if "error" in body:
-        raise GitHubError(f"token_error:{safe_code(body['error'])}")
+        code = safe_code(body["error"])
+        if code == "bad_refresh_token":
+            raise RefreshRejected(f"token_error:{code}")
+        raise GitHubError(f"token_error:{code}")
     try:
         access = body["access_token"]
         refresh = body.get("refresh_token")
@@ -102,18 +126,38 @@ def exchange_code(
     code_verifier: str,
     now: int,
 ) -> TokenPair:
+    return _token_call(
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+            "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
+        },
+        now,
+    )
+
+
+def refresh(*, client_id: str, client_secret: str, refresh_token: str, now: int) -> TokenPair:
+    """Rotate the pair. Single-use: after this, the old refresh and access tokens are dead.
+
+    A timeout here may mean GitHub rotated and we never saw the answer: the lost
+    rotation residual risk in spec §7.
+    """
+    return _token_call(
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        },
+        now,
+    )
+
+
+def _token_call(data: dict[str, str], now: int) -> TokenPair:
     try:
-        response = _client().post(
-            TOKEN_URL,
-            data={
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "code": code,
-                "redirect_uri": redirect_uri,
-                "code_verifier": code_verifier,
-            },
-            headers={"accept": "application/json"},
-        )
+        response = _client().post(TOKEN_URL, data=data, headers={"accept": "application/json"})
         body = response.json()
     except httpx.HTTPError:
         raise GitHubError("token_unreachable") from None
@@ -124,10 +168,26 @@ def exchange_code(
     return _token_pair(body, now)
 
 
-def get_user(access_token: str) -> GitHubUser:
+def _rate_limit_reset(response: httpx.Response, now: int) -> int | None:
+    """When to try again, if this 403/429 is a rate limit; None if it isn't one."""
+    if response.status_code not in (403, 429):
+        return None
+    retry_after = response.headers.get("retry-after")
+    if retry_after and retry_after.isdigit():
+        return now + int(retry_after)
+    reset = response.headers.get("x-ratelimit-reset")
+    if response.headers.get("x-ratelimit-remaining") == "0" and reset and reset.isdigit():
+        return int(reset)
+    return None
+
+
+def _api_get(
+    path: str, access_token: str, name: str, now: int, params: dict[str, Any] | None = None
+) -> httpx.Response:
     try:
         response = _client().get(
-            f"{API_URL}/user",
+            f"{API_URL}{path}",
+            params=params,
             headers={
                 "authorization": f"Bearer {access_token}",
                 "accept": "application/vnd.github+json",
@@ -135,9 +195,19 @@ def get_user(access_token: str) -> GitHubUser:
             },
         )
     except httpx.HTTPError:
-        raise GitHubError("user_unreachable") from None
-    if response.status_code != 200:
-        raise GitHubError(f"user_http_{response.status_code}")
+        raise GitHubError(f"{name}_unreachable") from None
+    if response.status_code == 200:
+        return response
+    if response.status_code == 401:
+        raise Unauthorized(f"{name}_http_401")
+    reset_at = _rate_limit_reset(response, now)
+    if reset_at is not None:
+        raise RateLimited(f"{name}_rate_limited", reset_at)
+    raise GitHubError(f"{name}_http_{response.status_code}")
+
+
+def get_user(access_token: str, now: int = 0) -> GitHubUser:
+    response = _api_get("/user", access_token, "user", now)
     try:
         body = response.json()
         return GitHubUser(
@@ -150,3 +220,34 @@ def get_user(access_token: str) -> GitHubUser:
         )
     except (KeyError, TypeError, ValueError):
         raise GitHubError("user_response_malformed") from None
+
+
+def get_public_events(
+    login: str, access_token: str, now: int = 0, limit: int = 10
+) -> list[dict[str, str]]:
+    """The user's last few public events (spec §5): public only, nothing private.
+
+    Newest first by ``created_at``: GitHub's feed is close to that order but not
+    exactly (the slice 3 browser check showed a push listed above a later one).
+    """
+    response = _api_get(
+        f"/users/{quote(login, safe='')}/events/public",
+        access_token,
+        "events",
+        now,
+        params={"per_page": limit},
+    )
+    try:
+        body = response.json()
+        events = [
+            {
+                "type": str(event["type"]),
+                "repo": str(event["repo"]["name"]),
+                "created_at": str(event["created_at"]),
+            }
+            for event in body[:limit]
+        ]
+        # ISO 8601 UTC strings sort in time order.
+        return sorted(events, key=lambda e: e["created_at"], reverse=True)
+    except (KeyError, TypeError, ValueError):
+        raise GitHubError("events_response_malformed") from None

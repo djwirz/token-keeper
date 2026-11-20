@@ -6,7 +6,8 @@
 3. Exchange the code with the PKCE verifier, then ``GET /user``.
 4. Write the account (new, or a takeover of the existing one), or stop with
    ``already_linked`` if this GitHub account belongs to another main-app user.
-5. Enqueue ``account.connected`` and redirect with ``?result=connected``.
+5. Enqueue ``account.connected`` and an immediate sync, and redirect with
+   ``?result=connected``.
 
 Tokens exist only in memory here and are encrypted with the ``account_id`` context
 before anything is written.
@@ -14,43 +15,14 @@ before anything is written.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any, Literal
 
-from token_keeper import crypto, delivery, github, ids, log, pages, settings
+from token_keeper import crypto, delivery, github, ids, log, pages, settings, snapshot, sync
 from token_keeper.handlers._shared import crypto as kms
-from token_keeper.handlers._shared import now, store
-from token_keeper.store import EncryptedTokens, Identity, StateRecord, WriteConflict
+from token_keeper.handlers._shared import encrypt_tokens, now, store
+from token_keeper.store import Identity, StateRecord, WriteConflict
 
 Outcome = Literal["connected", "already_linked"]
-
-
-def iso(epoch: int) -> str:
-    return datetime.fromtimestamp(epoch, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def profile_snapshot(user: github.GitHubUser, fetched_at: int) -> dict[str, Any]:
-    """The snapshot at connect time: profile only, no events yet (spec §6.3)."""
-    return {
-        "fetched_at": iso(fetched_at),
-        "profile": {
-            "name": user.name,
-            "avatar_url": user.avatar_url,
-            "public_repos": user.public_repos,
-            "followers": user.followers,
-        },
-        "recent_events": [],
-    }
-
-
-def _encrypt(account_id: str, tokens: github.TokenPair) -> EncryptedTokens:
-    context = crypto.account_context(account_id)
-    return EncryptedTokens(
-        access_token_ct=kms().encrypt(tokens.access_token, context),
-        refresh_token_ct=kms().encrypt(tokens.refresh_token, context),
-        access_expires_at=tokens.access_expires_at,
-        refresh_expires_at=tokens.refresh_expires_at,
-    )
 
 
 def save_connection(
@@ -63,7 +35,9 @@ def save_connection(
     """
     db = store()
     identity = Identity(github_user_id=user.id, login=user.login)
-    snapshot = profile_snapshot(user, current)
+    snap = snapshot.build(user, current)
+    # The callback enqueues a sync right away; the planner is the fallback if that fails.
+    next_due_at = current + sync.PLANNER_PUSH_SECONDS
     for attempt in (1, 2):
         account_id = db.account_for_user(record.app_id, record.external_user_id)
         owner = db.account_for_github_user(user.id)
@@ -77,9 +51,9 @@ def save_connection(
                     app_id=record.app_id,
                     external_user_id=record.external_user_id,
                     identity=identity,
-                    tokens=_encrypt(account_id, tokens),
-                    snapshot=snapshot,
-                    now=current,
+                    tokens=encrypt_tokens(account_id, tokens),
+                    snapshot=snap,
+                    next_due_at=next_due_at,
                 )
                 log.add_keys(account_id=account_id)
                 return "connected", account_id
@@ -90,9 +64,9 @@ def save_connection(
             db.reconnect_account(
                 account,
                 identity=identity,
-                tokens=_encrypt(account_id, tokens),
-                snapshot=snapshot,
-                now=current,
+                tokens=encrypt_tokens(account_id, tokens),
+                snapshot=snap,
+                next_due_at=next_due_at,
             )
             return "connected", account_id
         except WriteConflict:
@@ -160,5 +134,11 @@ def handler(event: dict[str, Any], context: object) -> pages.Response:
         event_type="account.connected",
         correlation_id=record.correlation_id,
     )
+    # The immediate sync (spec §4): recent events reach the card without waiting for
+    # the planner. If this send fails, next_due_at brings the planner to it.
+    try:
+        sync.enqueue(cfg.sync_queue_url, [account_id], correlation_id=record.correlation_id)
+    except Exception:
+        logger.exception("callback.sync_enqueue_failed")
     logger.info("callback.connected", extra={"webhook_id": webhook_id, "login": user.login})
     return _back(record.return_to, "connected")

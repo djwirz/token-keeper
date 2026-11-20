@@ -1,4 +1,5 @@
-"""Token Keeper: its Lambdas (connect, callback, planner, worker, deliverer) and data.
+"""Token Keeper: its Lambdas (connect, callback, planner, worker, deliverer,
+github-webhook) and data.
 
 Synth only until slice 4. Data that must survive any deploy is RETAIN (spec §10): the
 table (a replacement would lose every token) and the KMS key (deleting it would make
@@ -18,6 +19,9 @@ One role per Lambda, granted exactly what its handler does (spec §9, ADR 0003):
 - worker: ``kms:Encrypt`` and ``kms:Decrypt`` (the only other role with Decrypt),
   ``UpdateItem``/``PutItem`` (lease, tokens, snapshot) and ``SendMessage`` to the
   delivery queue.
+- github-webhook: ``GetItem`` on ``GHUSER#`` links, ``UpdateItem`` on ``ACCOUNT#``
+  rows (the revocation takeover) and ``SendMessage`` to the delivery queue; no KMS
+  (ADR 0018).
 
 Table grants are written as explicit statements on the table ARN, because
 ``table.grant()`` also grants every index once the table has one. Only the planner
@@ -25,9 +29,10 @@ reads the index.
 
 Item-level narrowing (ADR 0017): every role that touches only one kind of item gets a
 ``dynamodb:LeadingKeys`` condition on its partition-key prefix: connect ``STATE#``;
-planner, worker and deliverer ``ACCOUNT#``. The callback writes all four prefixes, so
-a condition would exclude nothing and it has none. The planner's index ``Query`` has
-none either: there the leading key is ``state``.
+planner, worker and deliverer ``ACCOUNT#``; github-webhook ``GHUSER#`` for its read
+and ``ACCOUNT#`` for its write, as two statements (ADR 0018). The callback writes all
+four prefixes, so a condition would exclude nothing and it has none. The planner's
+index ``Query`` has none either: there the leading key is ``state``.
 
 The worker's timeout (40 s) is below its 60 s lease, so it can't outlive the lease
 (ADR 0004, ADR 0015). Both queue consumers take one message per invocation.
@@ -69,6 +74,8 @@ SECRET_PARAMS = {
     "GITHUB_CLIENT_SECRET_PARAM": f"{SSM_PREFIX}/github-client-secret",
     "CONNECT_LINK_SECRET_PARAM": f"{SSM_PREFIX}/connect-link-secret",
     "WEBHOOK_SECRET_PARAM": f"{SSM_PREFIX}/webhook-secret",
+    # The GitHub App's webhook secret, for inbound deliveries (slice 5, ADR 0018).
+    "GITHUB_WEBHOOK_SECRET_PARAM": f"{SSM_PREFIX}/github-webhook-secret",
 }
 THROTTLE = {"rate": 5, "burst": 10}
 DELIVERER_TIMEOUT_SECONDS = 15
@@ -77,9 +84,13 @@ WORKER_TIMEOUT_SECONDS = 40
 WORKER_BATCH_SIZE = 1
 PLANNER_TIMEOUT_SECONDS = 60
 PLANNER_RATE_MINUTES = 15
+# GitHub records a delivery as failed after 10 s, so answer well inside that.
+GITHUB_WEBHOOK_TIMEOUT_SECONDS = 8
+GITHUB_WEBHOOK_PATH = "/github/webhook"
 # Partition-key prefixes (ADR 0013) for dynamodb:LeadingKeys (ADR 0017).
 ACCOUNT_PREFIX = "ACCOUNT#"
 STATE_PREFIX = "STATE#"
+GHUSER_PREFIX = "GHUSER#"
 # What the planner's push_due names: its keys, the two attributes it sets, and the
 # state its condition reads. Nothing else, so never a token, expiry or lease field.
 PLANNER_ATTRIBUTES = ("PK", "SK", "next_due_at", "version", "state")
@@ -336,6 +347,29 @@ class TokenKeeperStack(Stack):
             )
         )
 
+        # The revocation webhook (spec §6.4, ADR 0010, ADR 0018): no KMS. It reads only
+        # GitHub links and writes only Account rows (the takeover to needs_reauth).
+        github_webhook = function(
+            "GitHubWebhook",
+            "github_webhook",
+            GITHUB_WEBHOOK_TIMEOUT_SECONDS,
+            {
+                "DELIVERY_QUEUE_URL": queue.queue_url,
+                "GITHUB_WEBHOOK_SECRET_PARAM": SECRET_PARAMS["GITHUB_WEBHOOK_SECRET_PARAM"],
+            },
+        )
+        grant_table(github_webhook, "dynamodb:GetItem", conditions=leading_keys(GHUSER_PREFIX))
+        grant_table(github_webhook, "dynamodb:UpdateItem", conditions=leading_keys(ACCOUNT_PREFIX))
+        queue.grant_send_messages(github_webhook)
+        secret_param("GITHUB_WEBHOOK_SECRET_PARAM").grant_read(github_webhook)
+        api.add_routes(
+            path=GITHUB_WEBHOOK_PATH,
+            methods=[apigw.HttpMethod.POST],
+            integration=integrations.HttpLambdaIntegration(
+                "GitHubWebhookIntegration", github_webhook
+            ),
+        )
+
         for path, fn in (("/connect", connect), ("/callback", callback)):
             api.add_routes(
                 path=path,
@@ -352,3 +386,4 @@ class TokenKeeperStack(Stack):
         )
         CfnOutput(self, "ConnectUrl", value=f"{public_url}/connect")
         CfnOutput(self, "CallbackUrl", value=f"{public_url}/callback")
+        CfnOutput(self, "GitHubWebhookUrl", value=f"{public_url}{GITHUB_WEBHOOK_PATH}")

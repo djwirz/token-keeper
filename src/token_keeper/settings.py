@@ -12,7 +12,9 @@ Environment:
   - ``RECEIVER_URL``: the one registered main app's base URL (spec §2: one app, from
     config). It is the only allowed ``return_to``, and its webhook endpoint is
     ``<it>webhooks/token-keeper``.
-  - secrets: ``GITHUB_CLIENT_SECRET``, ``CONNECT_LINK_SECRET``, ``WEBHOOK_SECRET``
+  - secrets: ``GITHUB_CLIENT_SECRET``, ``CONNECT_LINK_SECRET``, ``WEBHOOK_SECRET`` (the
+    outbound Standard Webhooks one), ``GITHUB_WEBHOOK_SECRET`` (the GitHub App's, for
+    inbound deliveries)
 """
 
 from __future__ import annotations
@@ -25,6 +27,8 @@ from token_keeper.ssm import env_or_ssm
 
 APP_ID = "demo"
 WEBHOOK_PATH = "webhooks/token-keeper"
+# put_demo_secrets.py writes 64 hex characters (32 random bytes).
+MIN_GITHUB_WEBHOOK_SECRET_CHARS = 32
 
 
 class Settings:
@@ -64,6 +68,14 @@ class Settings:
     def webhook_secret(self) -> str:
         value = env_or_ssm("WEBHOOK_SECRET")
         webhooks.check_secret(value)
+        return value
+
+    @cached_property
+    def github_webhook_secret(self) -> str:
+        value = env_or_ssm("GITHUB_WEBHOOK_SECRET")
+        if len(value) < MIN_GITHUB_WEBHOOK_SECRET_CHARS:
+            # Fail at cold start, not by rejecting every delivery as forged.
+            raise ValueError("GitHub webhook secret is too short")
         return value
 
     @cached_property

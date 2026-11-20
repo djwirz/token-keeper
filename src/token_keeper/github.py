@@ -1,5 +1,6 @@
 """The GitHub calls Token Keeper makes (spec §5): authorize, code exchange, refresh,
-``GET /user`` and ``GET /users/{login}/events/public``.
+``GET /user`` and ``GET /users/{login}/events/public``, plus the signature check on
+GitHub's App webhook deliveries (spec §6.4).
 
 Token-endpoint calls send ``Accept: application/json`` and treat an ``error`` field in
 the body as the failure, whatever the HTTP status: GitHub answers most token errors
@@ -8,6 +9,8 @@ with a 200.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import re
 from dataclasses import dataclass
 from functools import cache
@@ -49,6 +52,31 @@ class RateLimited(GitHubError):
     def __init__(self, reason: str, reset_at: int) -> None:
         super().__init__(reason)
         self.reset_at = reset_at
+
+
+SIGNATURE_PREFIX = "sha256="
+
+
+class WebhookSignatureError(Exception):
+    """An App webhook delivery isn't signed with our secret. ``reason`` is safe to log."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def verify_webhook_signature(secret: str, header: str | None, body: bytes) -> None:
+    """Check ``X-Hub-Signature-256`` (spec §6.4) before anything reads the body.
+
+    GitHub sends ``sha256=`` and the lowercase hex HMAC-SHA256 of the raw body, keyed
+    with the App's webhook secret. Compared in constant time, as GitHub's docs ask.
+    Only the body is signed: the headers (the event name, the delivery GUID) are not.
+    """
+    if not header:
+        raise WebhookSignatureError("missing_signature")
+    expected = SIGNATURE_PREFIX + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(header.encode(), expected.encode()):
+        raise WebhookSignatureError("bad_signature")
 
 
 def safe_code(value: object) -> str:

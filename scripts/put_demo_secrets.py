@@ -2,6 +2,7 @@
 
     uv run python scripts/put_demo_secrets.py --profile token-keeper
     uv run python scripts/put_demo_secrets.py --profile token-keeper --show-passcode
+    uv run python scripts/put_demo_secrets.py --profile token-keeper --github-webhook-secret
 
 - The GitHub App's client ID and secret come from the main checkout's ``.env.local``
   (the same App serves localhost and the deployed callback).
@@ -13,6 +14,11 @@
   then both sides of a shared secret are written back to back. SSM has no transaction,
   so if a write fails between them the script says so: rerun with ``--overwrite``, which
   generates and writes a fresh pair.
+- ``--github-webhook-secret`` (slice 5) writes only the GitHub App's webhook secret:
+  32 random bytes as hex, generated here. It goes to SSM and onto the clipboard
+  (``pbcopy``) for pasting into the App's settings, and is never printed or written to
+  disk. It refuses if the parameter exists, unless ``--overwrite`` is given; then the
+  App's setting must be pasted again, or every delivery fails its signature check.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ import secrets
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
@@ -57,13 +64,50 @@ def main_checkout_env() -> dict[str, str]:
     return values
 
 
+def exists(ssm: Any, name: str) -> bool:
+    try:
+        ssm.get_parameter(Name=name)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "ParameterNotFound":
+            raise
+        return False
+    return True
+
+
+def to_clipboard(value: str) -> None:
+    # Through stdin, so the value never appears in a process list.
+    subprocess.run(["pbcopy"], input=value, text=True, check=True)  # noqa: S607
+
+
+def put_github_webhook_secret(ssm: Any, *, overwrite: bool) -> None:
+    name = TOKEN_KEEPER["GITHUB_WEBHOOK_SECRET_PARAM"]
+    if exists(ssm, name) and not overwrite:
+        sys.exit(f"Already set (nothing written; use --overwrite): {name}")
+    value = secrets.token_hex(32)
+    try:
+        ssm.put_parameter(Name=name, Value=value, Type="SecureString", Overwrite=True)
+    except ClientError as exc:
+        sys.exit(f"failed writing {name}: {exc.response['Error']['Code']}")
+    to_clipboard(value)
+    print(f"wrote {name} (SecureString)")
+    print(
+        "The secret is on your clipboard. Paste it into the GitHub App's settings, "
+        "Webhook secret, and save. Then copy something else to clear it."
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", required=True)
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--show-passcode", action="store_true")
+    parser.add_argument("--github-webhook-secret", action="store_true")
     args = parser.parse_args()
     ssm = boto3.Session(profile_name=args.profile, region_name=REGION).client("ssm")
+
+    if args.github_webhook_secret:
+        put_github_webhook_secret(ssm, overwrite=args.overwrite)
+        return
 
     if args.show_passcode:
         name = RECEIVER["DEMO_PASSCODE_PARAM"]
@@ -90,14 +134,7 @@ def main() -> None:
     }
     names = [*secure, GITHUB_CLIENT_ID_PARAM]
 
-    existing = []
-    for name in names:
-        try:
-            ssm.get_parameter(Name=name)
-            existing.append(name)
-        except ClientError as exc:
-            if exc.response["Error"]["Code"] != "ParameterNotFound":
-                raise
+    existing = [name for name in names if exists(ssm, name)]
     if existing and not args.overwrite:
         sys.exit("Already set (nothing written; use --overwrite):\n  " + "\n  ".join(existing))
 

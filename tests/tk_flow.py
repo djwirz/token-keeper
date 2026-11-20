@@ -155,3 +155,41 @@ def message_bodies(queue_url: str) -> list[dict[str, Any]]:
     import json
 
     return [json.loads(m["Body"]) for m in queue_messages(queue_url)]
+
+
+# Revocation webhook (slice 5) ---------------------------------------------------
+
+
+def github_delivery(
+    name: str = "github_app_authorization",
+    *,
+    secret: str | None = None,
+    body: bytes | None = None,
+    headers: dict[str, str | None] | None = None,
+) -> dict[str, Any]:
+    """An API Gateway event for a recorded GitHub delivery, signed like GitHub signs it."""
+    import hashlib
+    import hmac
+    import json
+    from pathlib import Path
+
+    from tests.conftest import GITHUB_WEBHOOK_SECRET
+
+    vectors = json.loads((Path(__file__).parent / "vectors" / "github_deliveries.json").read_text())
+    recorded = vectors[name]
+    raw = body if body is not None else json.dumps(recorded["body"]).encode()
+    key = (secret or GITHUB_WEBHOOK_SECRET).encode()
+    signature = "sha256=" + hmac.new(key, raw, hashlib.sha256).hexdigest()
+    all_headers = {**recorded["headers"], "X-Hub-Signature-256": signature, **(headers or {})}
+    return http_event(
+        "POST",
+        "/github/webhook",
+        body=raw.decode(),
+        headers={k: v for k, v in all_headers.items() if v is not None},
+    )
+
+
+def run_github_webhook(event: dict[str, Any]) -> int:
+    from token_keeper.handlers import github_webhook
+
+    return int(github_webhook.handler(event, None)["statusCode"])

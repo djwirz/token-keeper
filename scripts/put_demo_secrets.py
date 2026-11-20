@@ -10,7 +10,9 @@
   value to both names.
 - No value is ever printed, except the passcode with ``--show-passcode``, which only
   reads it back. Existing parameters are left alone unless ``--overwrite`` is given;
-  then both sides of a shared secret change together.
+  then both sides of a shared secret are written back to back. SSM has no transaction,
+  so if a write fails between them the script says so: rerun with ``--overwrite``, which
+  generates and writes a fresh pair.
 """
 
 from __future__ import annotations
@@ -48,7 +50,10 @@ def main_checkout_env() -> dict[str, str]:
     for line in path.read_text().splitlines():
         name, sep, value = line.partition("=")
         if sep and not name.startswith("#"):
-            values[name.strip()] = value.strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]  # KEY="value" is common in .env files
+            values[name.strip()] = value
     return values
 
 
@@ -74,11 +79,12 @@ def main() -> None:
 
     webhook = "whsec_" + base64.b64encode(secrets.token_bytes(32)).decode()
     connect_link = secrets.token_urlsafe(32)
+    # Each shared secret's two names are adjacent, so a failure splits at most one pair.
     secure = {
         TOKEN_KEEPER["GITHUB_CLIENT_SECRET_PARAM"]: client_secret,
         TOKEN_KEEPER["CONNECT_LINK_SECRET_PARAM"]: connect_link,
-        TOKEN_KEEPER["WEBHOOK_SECRET_PARAM"]: webhook,
         RECEIVER["CONNECT_LINK_SECRET_PARAM"]: connect_link,
+        TOKEN_KEEPER["WEBHOOK_SECRET_PARAM"]: webhook,
         RECEIVER["WEBHOOK_SECRET_PARAM"]: webhook,
         RECEIVER["DEMO_PASSCODE_PARAM"]: secrets.token_urlsafe(16),
     }
@@ -96,7 +102,14 @@ def main() -> None:
         sys.exit("Already set (nothing written; use --overwrite):\n  " + "\n  ".join(existing))
 
     for name, value in secure.items():
-        ssm.put_parameter(Name=name, Value=value, Type="SecureString", Overwrite=True)
+        try:
+            ssm.put_parameter(Name=name, Value=value, Type="SecureString", Overwrite=True)
+        except ClientError as exc:
+            # The error names the parameter, never its value.
+            sys.exit(
+                f"failed writing {name}: {exc.response['Error']['Code']}. A shared secret "
+                "may now differ between the stacks: rerun with --overwrite."
+            )
         print(f"wrote {name} (SecureString)")
     ssm.put_parameter(Name=GITHUB_CLIENT_ID_PARAM, Value=client_id, Type="String", Overwrite=True)
     print(f"wrote {GITHUB_CLIENT_ID_PARAM} (String)")

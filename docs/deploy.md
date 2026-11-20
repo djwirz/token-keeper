@@ -30,6 +30,7 @@ Every command below assumes `AWS_PROFILE=token-keeper`, Node 22+, and a fresh La
    - It reads the GitHub App's client ID and secret from `.env.local`, and generates the webhook secret, connect-link secret and passcode.
    - It prints no values. `--show-passcode` reads the passcode back when you need it.
    - After an `--overwrite`, a running Lambda keeps the old value until its next cold start.
+   - SSM has no transaction. If a write fails partway, the script says so, and a shared secret may differ between the stacks (every delivery would then fail its signature check). Rerun with `--overwrite`.
 5. **The app stacks:** `npx cdk deploy DemoReceiver`, then `npx cdk deploy TokenKeeper`.
    - With URLs shared through SSM (ADR 0014), there's no third deploy.
    - Until both are up, a Lambda that needs the other stack's URL fails at cold start with "parameter not found".
@@ -45,6 +46,11 @@ Every command below assumes `AWS_PROFILE=token-keeper`, Node 22+, and a fresh La
   out DeployRoleArn | gh secret set AWS_DEPLOY_ROLE_ARN --env demo
   ```
 - **What then runs:** every PR from this repo gets a `cdk diff` comment. Every push to `main` runs `deploy.yml`, which waits for approval in `demo`.
+- **The OIDC subject:** check which form GitHub sends before deploying `CiRoles`. This repo uses immutable subjects, which carry the owner and repo IDs; `infra/stacks/ci_roles.py` must match the prefix this prints:
+  ```bash
+  gh api repos/djwirz/token-keeper/actions/oidc/customization/sub --jq .sub_claim_prefix
+  ```
+- **`main` is not branch-protected** (no ruleset, no required checks). `deploy.yml` runs on every push to `main` whatever CI's result, so the `demo` approval is the only gate. A ruleset requiring a PR and the "Lint, types, tests", "Lambda build and CDK synth" and "Secret scan" checks would close that; the diff job stays optional, since it's the first thing to cut.
 
 ## Forcing a refresh (proof, not routine)
 

@@ -1,13 +1,16 @@
 """GitHub Actions → AWS through OIDC: no AWS keys anywhere (spec §9, ADR 0016).
 
-Two roles, each trusting exactly one GitHub OIDC subject:
+Two roles, each trusting exactly one GitHub OIDC subject. The repo uses GitHub's
+immutable subjects, which name the owner and repo by name *and* numeric ID
+(``repo:<owner>@<owner_id>/<repo>@<repo_id>:...``), so a renamed, deleted or re-created
+repo can't inherit the trust. The IDs are public (``gh api repos/<owner>/<repo>``).
 
-- ``DeployRole`` trusts ``repo:<repo>:environment:demo``. GitHub only issues that subject
+- ``DeployRole`` trusts ``<prefix>:environment:demo``. GitHub only issues that subject
   to a job that runs in the ``demo`` environment, whose rules allow only ``main`` and
   require Dan's approval. The role can do nothing but assume CDK's bootstrap roles
   (deploy, file publishing, lookup), which do the actual work.
-- ``DiffRole`` trusts ``repo:<repo>:pull_request`` and can only assume the bootstrap
-  lookup role, which is read-only. ``cdk diff`` needs no more.
+- ``DiffRole`` trusts ``<prefix>:pull_request`` and can only assume the bootstrap
+  lookup role: read-only, though account-wide (ADR 0016). ``cdk diff`` needs no more.
 
 This stack is deployed by hand, once, from an admin session. CI never deploys it, so
 CI can't widen its own trust. It uses the L1 OIDC provider (the L2 one needs a
@@ -24,11 +27,15 @@ from aws_cdk import CfnOutput, Duration, LegacyStackSynthesizer, Stack
 from aws_cdk import aws_iam as iam
 from constructs import Construct
 
-GITHUB_REPO = "djwirz/token-keeper"
+GITHUB_OWNER, GITHUB_OWNER_ID = "djwirz", 15788618
+GITHUB_REPO, GITHUB_REPO_ID = "token-keeper", 1463349634
+# The prefix GitHub reports for this repo (actions/oidc/customization/sub:
+# use_immutable_subject). The name-only form, repo:djwirz/token-keeper:..., never matches.
+SUBJECT_PREFIX = f"repo:{GITHUB_OWNER}@{GITHUB_OWNER_ID}/{GITHUB_REPO}@{GITHUB_REPO_ID}"
 OIDC_HOST = "token.actions.githubusercontent.com"
 AUDIENCE = "sts.amazonaws.com"
-DEPLOY_SUBJECT = f"repo:{GITHUB_REPO}:environment:demo"
-DIFF_SUBJECT = f"repo:{GITHUB_REPO}:pull_request"
+DEPLOY_SUBJECT = f"{SUBJECT_PREFIX}:environment:demo"
+DIFF_SUBJECT = f"{SUBJECT_PREFIX}:pull_request"
 # CDK's default bootstrap qualifier: cdk-<qualifier>-<kind>-role-<account>-<region>.
 BOOTSTRAP_QUALIFIER = "hnb659fds"
 DEPLOY_ASSUMES = ("deploy", "file-publishing", "lookup")

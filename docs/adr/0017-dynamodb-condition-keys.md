@@ -33,7 +33,7 @@ None were dropped. What the first deploy (2026-11-20) showed:
 - **`state` has to be in the planner's list.** It's named only in the planner's condition expression, yet with it removed, the planner's real request is denied. So DynamoDB counts every name a request uses, not only the ones it writes. This also shows the attribute condition is genuinely enforced, not vacuously true.
 
 ## Consequences
-- The planner can no longer write a token, an expiry, the lease or `state` itself. `state` is in the list, but its code never sets it.
+- The planner can no longer write a token, an expiry or the lease. It could still set `state` as far as IAM goes: DynamoDB counts every name a request uses, so `state` has to be in the list for the planner's condition to read it, and the attribute condition can't tell a read from a write. Only its code keeps it from setting `state`.
 - The worker, connect and deliverer can't touch rows outside their prefix. The callback stays table-wide.
 - **Tied to the code:** a CDK assertion test pins each condition exactly. Another test reads the attribute names from the planner's real `push_due` request and requires them to equal the IAM list, so a new field in that request fails CI instead of failing in AWS.
 - **A known gap:** the `ForAllValues` empty-set case. Every request these roles make is a keyed item operation, which carries `LeadingKeys`, and the live probe shows DynamoDB sends both keys. A future `Scan` or `BatchWriteItem` on these roles would need its own check before it's trusted.

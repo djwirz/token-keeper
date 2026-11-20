@@ -74,21 +74,30 @@ jobs:
           aws-region: us-east-1
           mask-aws-account-id: true
       - name: cdk diff
+        id: diff
         run: |
           set -o pipefail
           npx cdk diff DemoReceiver TokenKeeper --no-change-set 2>&1 | tee build/diff.txt
       - name: Post the diff
-        if: always()
+        # Also when the diff or the role assumption failed, so the comment never keeps
+        # showing an older, successful diff. Not when the job was cancelled.
+        if: success() || failure()
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ github.event.pull_request.number }}
+          OUTCOME: ${{ steps.diff.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           # Log masking doesn't reach a comment body, so scrub anything account-shaped.
           {
             echo "### cdk diff against \`demo\`"
-            echo '```'
-            sed -E 's/[0-9]{12}/<account>/g' build/diff.txt 2>/dev/null | head -c 60000
-            echo '```'
+            if [ "$OUTCOME" = success ]; then
+              echo '```'
+              sed -E 's/[0-9]{12}/<account>/g' build/diff.txt | head -c 60000
+              echo '```'
+            else
+              echo "**No diff:** the job failed before or during \`cdk diff\` ($OUTCOME). See [the run]($RUN_URL)."
+            fi
           } > build/diff.md
           cat build/diff.md >> "$GITHUB_STEP_SUMMARY"
           gh pr comment "$PR" --edit-last --create-if-none --body-file build/diff.md

@@ -14,9 +14,12 @@ and so on) must be denied.
   ``dynamodb:Attributes`` the simulator would still say "denied" while the real
   condition denied nothing.
 - ``--live`` settles that. It creates one temporary role per Lambda role, carrying a
-  copy of that role's inline policies, and assumes it. Then it sends real DynamoDB
+  copy of that role's DynamoDB statements (never its KMS, SSM or SQS ones), trusted
+  only by the caller, and assumes it. Then it sends real DynamoDB
   requests against ``iam-probe`` keys that don't exist, each with a condition that
-  can't hold, so nothing is ever written. IAM is checked before the condition:
+  can't hold, so nothing is ever written. The planner's and the deliverer's allowed
+  requests go through ``Store`` itself, so the proof follows the code rather than a copy
+  of it. IAM is checked before the condition:
   ``ConditionalCheckFailed`` (or a plain success for a read) means allowed, and
   ``AccessDenied`` means denied. The temporary roles are deleted at the end, even on
   failure.
@@ -38,11 +41,14 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+from infra.stacks.token_keeper import PLANNER_ATTRIBUTES
+from token_keeper.store import Store
+
 REGION = "us-east-1"
 STACK = "TokenKeeper"
 HANDLERS = ("connect", "callback", "planner", "worker", "deliverer")
 PROBE = "iam-probe"
-PLANNER_ATTRS = ["PK", "SK", "next_due_at", "version", "state"]
+PLANNER_ATTRS = list(PLANNER_ATTRIBUTES)
 
 
 @dataclass(frozen=True)
@@ -54,7 +60,7 @@ class Case:
     attrs: tuple[str, ...] = ()  # non-key attributes the request names
     return_values: str | None = None
     index: bool = False
-    push_due: bool = False  # the planner's exact request shape
+    push_due: bool = False  # the planner's real request (Store.push_due)
     note: str = field(default="", compare=False)
 
 
@@ -178,6 +184,9 @@ def live_call(ddb: Any, table: str, case: Case) -> bool:
                 ExpressionAttributeNames={"#s": "state"},
                 ExpressionAttributeValues={":active": {"S": case.pk}, ":now": {"N": "0"}},
             )
+        elif case.action == "Query" and case.pk == f"ACCOUNT#{PROBE}":
+            # The deliverer's real request.
+            Store(table, client=ddb).get_account_and_snapshot(PROBE)
         elif case.action == "Query":
             ddb.query(
                 TableName=table,
@@ -188,20 +197,9 @@ def live_call(ddb: Any, table: str, case: Case) -> bool:
             item = {**key, **{a: {"S": "x"} for a in case.attrs}}
             ddb.put_item(TableName=table, Item=item, ConditionExpression=never)
         elif case.push_due:
-            # store.push_due's exact shape; its condition fails on a missing item.
-            ddb.update_item(
-                TableName=table,
-                Key=key,
-                UpdateExpression="SET next_due_at = :until, version = version + :one",
-                ConditionExpression="#state = :active AND next_due_at <= :now",
-                ExpressionAttributeNames={"#state": "state"},
-                ExpressionAttributeValues={
-                    ":until": {"N": "2"},
-                    ":one": {"N": "1"},
-                    ":active": {"S": "active"},
-                    ":now": {"N": "1"},
-                },
-            )
+            # The planner's real request. Its condition fails on the missing item, which
+            # push_due turns into False; AccessDenied still raises.
+            Store(table, client=ddb).push_due(PROBE, now=1, until=2)
         else:
             names = {f"#a{i}": a for i, a in enumerate(case.attrs)}
             kwargs: dict[str, Any] = {
@@ -225,13 +223,38 @@ def live_call(ddb: Any, table: str, case: Case) -> bool:
     return True
 
 
-class ProbeRoles:
-    """One temporary role per Lambda role, each with a copy of its inline policies."""
+def dynamodb_only(policies: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The policies with only their DynamoDB statements: a probe needs nothing else, and a
+    copy of a role that can ``kms:Decrypt`` shouldn't exist even for a few minutes."""
+    kept: dict[str, dict[str, Any]] = {}
+    for name, document in policies.items():
+        statements = []
+        for statement in document["Statement"]:
+            actions = statement["Action"]
+            actions = [actions] if isinstance(actions, str) else actions
+            if all(a.startswith("dynamodb:") for a in actions):
+                statements.append(statement)
+        if statements:
+            kept[name] = {**document, "Statement": statements}
+    return kept
 
-    def __init__(self, session: boto3.Session, account: str) -> None:
+
+def principal_of(caller_arn: str) -> str:
+    """An IAM principal for the caller (an assumed-role session becomes its role)."""
+    if ":assumed-role/" in caller_arn:
+        prefix, rest = caller_arn.split(":assumed-role/", 1)
+        return prefix.replace(":sts:", ":iam:") + ":role/" + rest.split("/", 1)[0]
+    return caller_arn
+
+
+class ProbeRoles:
+    """One temporary role per Lambda role, each with a copy of its DynamoDB statements."""
+
+    def __init__(self, session: boto3.Session, account: str, caller_arn: str) -> None:
         self.iam = session.client("iam")
         self.sts = session.client("sts")
         self.account = account
+        self.principal = principal_of(caller_arn)
         self.tag = uuid.uuid4().hex[:8]
         self.created: dict[str, list[str]] = {}
 
@@ -242,7 +265,7 @@ class ProbeRoles:
             "Statement": [
                 {
                     "Effect": "Allow",
-                    "Principal": {"AWS": f"arn:aws:iam::{self.account}:root"},
+                    "Principal": {"AWS": self.principal},
                     "Action": "sts:AssumeRole",
                 }
             ],
@@ -287,12 +310,18 @@ class ProbeRoles:
                 sys.exit(f"{role_name}: not usable after 90 s")
             time.sleep(5)
 
-    def delete_all(self) -> None:
+    def delete_all(self) -> list[str]:
+        """Delete every role, carrying on past failures; returns the ones left behind."""
+        left = []
         for name, policies in self.created.items():
-            for policy in policies:
-                self.iam.delete_role_policy(RoleName=name, PolicyName=policy)
-            self.iam.delete_role(RoleName=name)
+            try:
+                for policy in policies:
+                    self.iam.delete_role_policy(RoleName=name, PolicyName=policy)
+                self.iam.delete_role(RoleName=name)
+            except ClientError:
+                left.append(name)
         self.created.clear()
+        return left
 
 
 def ready_for(table: str, case: Case) -> Callable[[Any], bool]:
@@ -320,8 +349,17 @@ def main() -> None:
     parser.add_argument("--live", action="store_true")
     args = parser.parse_args()
     session = boto3.Session(profile_name=args.profile, region_name=REGION)
-    account = session.client("sts").get_caller_identity()["Account"]
-    mask = Masker(account)
+    caller = session.client("sts").get_caller_identity()
+    mask = Masker(caller["Account"])
+    try:
+        run(session, caller, mask, live=args.live)
+    except ClientError as exc:
+        # AWS error messages carry ARNs, so they go through the masker too.
+        sys.exit(mask(f"error: {exc}"))
+
+
+def run(session: boto3.Session, caller: dict[str, str], mask: Masker, *, live: bool) -> None:
+    account = caller["Account"]
     iam = session.client("iam")
     roles, table_arn = deployed_roles(session)
     table = table_arn.rsplit("/", 1)[1]
@@ -337,24 +375,24 @@ def main() -> None:
         extra = f" ReturnValues={case.return_values}" if case.return_values else ""
         print(mask(f"{'ok ' if ok else 'BAD'} {label}{extra}: {verdict}"))
 
-    if not args.live:
+    if not live:
         print("mode: simulate (IAM policy simulator, deployed role policies)")
         for case in CASES:
             report(case, simulate(iam, roles[case.handler], table_arn, case))
     else:
         print("mode: live (temporary roles with copies of the deployed policies)")
-        probes = ProbeRoles(session, account)
+        probes = ProbeRoles(session, account, caller["Arn"])
         try:
             clients = {}
             for handler in HANDLERS:
-                policies = inline_policies(iam, roles[handler])
+                policies = dynamodb_only(inline_policies(iam, roles[handler]))
                 name = probes.create(handler, policies)
                 first = next(c for c in CASES if c.handler == handler and c.allow)
                 clients[handler] = probes.client(name, ready_for(table, first))
             for case in CASES:
                 report(case, live_call(clients[case.handler], table, case))
             # Does a name only in the ConditionExpression count towards dynamodb:Attributes?
-            planner_policies = without_state(inline_policies(iam, roles["planner"]))
+            planner_policies = without_state(dynamodb_only(inline_policies(iam, roles["planner"])))
             name = probes.create("planner-nostate", planner_policies)
             push_due = next(c for c in CASES if c.push_due)
             # Ready once its (unchanged) index query works, so a denial below is the
@@ -367,8 +405,12 @@ def main() -> None:
                 + ("denied: condition-only names count" if counts else "allowed: they don't")
             )
         finally:
-            probes.delete_all()
-            print("temporary roles deleted")
+            left = probes.delete_all()
+            if left:
+                print("LEFT BEHIND, delete by hand: " + ", ".join(left))
+                failures += 1
+            else:
+                print("temporary roles deleted")
 
     print("PASS" if failures == 0 else f"FAIL ({failures} case(s) disagree)")
     sys.exit(1 if failures else 0)

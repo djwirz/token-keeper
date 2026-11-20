@@ -606,8 +606,11 @@ def test_ci_roles_trust_one_github_subject_each_and_only_assume_bootstrap_roles(
         ]
         assert role["Properties"]["MaxSessionDuration"] == 3600
     assert trusted == {"Deploy": DEPLOY_SUBJECT, "Diff": DIFF_SUBJECT}
-    assert DEPLOY_SUBJECT == "repo:djwirz/token-keeper:environment:demo"
-    assert DIFF_SUBJECT == "repo:djwirz/token-keeper:pull_request"
+    # GitHub's immutable subjects (owner and repo by name and ID), as the repo's
+    # actions/oidc/customization/sub reports them. The name-only form was what slice 4
+    # first deployed, and every assume failed: pinning our own constant proved nothing.
+    assert DEPLOY_SUBJECT == "repo:djwirz@15788618/token-keeper@1463349634:environment:demo"
+    assert DIFF_SUBJECT == "repo:djwirz@15788618/token-keeper@1463349634:pull_request"
     grants = _grants_by_role(ci_roles)
     by_name = {logical.split("Role")[0]: logical for logical in roles}
     assert grants[by_name["Deploy"]] == {

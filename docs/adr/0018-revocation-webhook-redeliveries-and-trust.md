@@ -46,3 +46,12 @@ Option 2, plus these rules:
 - **A stated limitation: a dropped delivery** is caught only by the next sync's 401, as `unauthorized` rather than `revoked` (ADR 0010).
 - The recorded deliveries in `tests/vectors/github_deliveries.json` follow GitHub's documented shape, with synthetic ids. They're checked against a real delivery from Recent Deliveries after the live run, since twice in slice 4 a test pinned our own idea of the other side rather than what it really sent.
 - Metrics for received and rejected deliveries (`RevocationReceived`, spec §8) come with slice 6.
+
+## Proven live, 2026-11-20
+The decision above is unchanged. What the deployed `demo` run showed:
+- **IAM:** `prove_iam.py` passed all 22 cases, simulate and `--live`, including the 6 for this role. Both `LeadingKeys` conditions are kept. The probe left no roles and no items behind.
+- **Signature first:** a forged and an unsigned request both got 401. Dan's first real revocation also got 401 (`missing_signature`): the App had no secret saved. Nothing was parsed or written. After the secret was set again and the Lambda recycled, a redelivery of that same failed delivery flipped the card to "needs re-auth (revoked)". The version moved from 11 to 12, the tokens were deleted, and the deliverer's POST got a 204 within seconds.
+- **Redeliveries:** GitHub kept the original GUID on every redelivery, and signed each one with the App's current secret.
+  - A redelivery while revoked logged `already_revoked`, and the version stayed at 12.
+  - After Dan reconnected (version 15), two more redeliveries of the same GUID logged `already_revoked`, and the card stayed Connected.
+- **The payload:** GitHub lists the event as `github_app_authorization.revoked`. The body's top-level keys are exactly `action` and `sender`, `sender.id` is a number, and there's no `installation`. GitHub also sends the legacy SHA-1 `X-Hub-Signature` header. The test fixture now matches, and a test checks that the SHA-1 header alone is refused.

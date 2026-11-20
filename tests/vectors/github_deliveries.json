@@ -1,5 +1,5 @@
 {
-  "_comment": "GitHub App webhook deliveries for tests/test_github_webhook.py. Shapes follow GitHub's docs (webhook-events-and-payloads: delivery headers, github_app_authorization, ping) and Octokit's webhook schema (action 'revoked'); ids and logins are synthetic. Signatures are computed by the tests with a test secret. The signature vector is GitHub's own published example (validating-webhook-deliveries). Check these against a real delivery from the App's Recent Deliveries after the live run.",
+  "_comment": "GitHub App webhook deliveries for tests/test_github_webhook.py, with synthetic ids, logins and URLs. Headers and payload keys were checked against a real github_app_authorization delivery in the App's Recent Deliveries on 2026-11-20 (GitHub lists it as github_app_authorization.revoked; top-level keys are exactly action and sender; sender.id is a number; no installation). GitHub also sends the legacy SHA-1 X-Hub-Signature, which the handler must never accept in place of X-Hub-Signature-256. Signatures are computed by the tests with a test secret. The signature vector is GitHub's own published example (validating-webhook-deliveries).",
   "signature_vector": {
     "source": "https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries",
     "secret": "It's a Secret to Everybody",
@@ -15,7 +15,8 @@
       "X-GitHub-Event": "github_app_authorization",
       "X-GitHub-Hook-ID": "100000001",
       "X-GitHub-Hook-Installation-Target-ID": "200000001",
-      "X-GitHub-Hook-Installation-Target-Type": "integration"
+      "X-GitHub-Hook-Installation-Target-Type": "integration",
+      "X-Hub-Signature": "sha1=0000000000000000000000000000000000000000"
     },
     "body": {
       "action": "revoked",
@@ -24,7 +25,20 @@
         "id": 1234,
         "node_id": "MDQ6VXNlcjEyMzQ=",
         "avatar_url": "https://avatars.githubusercontent.com/u/1234?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/octo-demo",
+        "html_url": "https://github.com/octo-demo",
+        "followers_url": "https://api.github.com/users/octo-demo/followers",
+        "following_url": "https://api.github.com/users/octo-demo/following{/other_user}",
+        "gists_url": "https://api.github.com/users/octo-demo/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/octo-demo/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/octo-demo/subscriptions",
+        "organizations_url": "https://api.github.com/users/octo-demo/orgs",
+        "repos_url": "https://api.github.com/users/octo-demo/repos",
+        "events_url": "https://api.github.com/users/octo-demo/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/octo-demo/received_events",
         "type": "User",
+        "user_view_type": "public",
         "site_admin": false
       }
     }
@@ -38,13 +52,24 @@
       "X-GitHub-Event": "ping",
       "X-GitHub-Hook-ID": "100000001",
       "X-GitHub-Hook-Installation-Target-ID": "200000001",
-      "X-GitHub-Hook-Installation-Target-Type": "integration"
+      "X-GitHub-Hook-Installation-Target-Type": "integration",
+      "X-Hub-Signature": "sha1=0000000000000000000000000000000000000000"
     },
     "body": {
       "zen": "Keep it logically awesome.",
       "hook_id": 100000001,
-      "hook": {"type": "App", "id": 100000001, "app_id": 200000001, "active": true, "events": []},
-      "sender": {"login": "octo-demo", "id": 1234, "type": "User"}
+      "hook": {
+        "type": "App",
+        "id": 100000001,
+        "app_id": 200000001,
+        "active": true,
+        "events": []
+      },
+      "sender": {
+        "login": "octo-demo",
+        "id": 1234,
+        "type": "User"
+      }
     }
   }
 }

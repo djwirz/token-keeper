@@ -63,14 +63,14 @@ GitHub tells Token Keeper when Dan revokes the App, through `POST /github/webhoo
    It refuses if the parameter exists. With `--overwrite` it makes a new one, and the App's setting must then be pasted again. A warm Lambda keeps the old value, and answers 401 to every real delivery until it's recycled. GitHub never retries, so after an overwrite:
    - force a cold start: `aws lambda update-function-configuration --function-name "$FN" --description "secret rotated $(date +%F)"`, where `$FN` is the `GitHubWebhook` function's name from the stack's resources;
    - then press Redeliver on anything that failed in Recent Deliveries.
-2. **The GitHub App:** Settings → Developer settings → GitHub Apps → the App → General → Webhook:
+2. **The GitHub App**, only once the deploy has finished (GitHub sends its `ping` when the webhook is saved, and doesn't retry a 404): Settings → Developer settings → GitHub Apps → the App → General → Webhook:
    - tick **Active**;
    - set the URL to the `TokenKeeper.GitHubWebhookUrl` stack output;
    - paste the secret;
-   - save, then copy something else to clear the clipboard.
+   - click **Save changes** at the bottom of the page, then copy something else to clear the clipboard.
 
    The App receives `github_app_authorization` by default and can't unsubscribe from it.
-3. **Check it:** the App's Advanced tab lists Recent Deliveries with our status code. A forged request must get a 401:
+3. **Check it, before anyone revokes anything.** Prove that GitHub signs with the secret Token Keeper has. In the App's Advanced tab, press Redeliver on the `ping`: Recent Deliveries must show **204**, and the Lambda log `github_webhook.ignored` with `ignored_event`. A 401 with `missing_signature` means the App has no secret saved, and `bad_signature` means it holds a different one. In the first live run, the secret hadn't saved and the first revocation got a 401 (2026-11-20). GitHub signs a redelivery with the App's *current* secret, so after fixing the secret, redelivering the failed delivery works. A forged request must also get a 401:
    ```bash
    URL=$(aws cloudformation describe-stacks --stack-name TokenKeeper --query "Stacks[0].Outputs[?OutputKey=='GitHubWebhookUrl'].OutputValue" --output text)
    curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'X-GitHub-Event: ping' -H 'X-Hub-Signature-256: sha256=00' -d '{}' "$URL"

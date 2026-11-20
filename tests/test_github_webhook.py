@@ -261,6 +261,25 @@ def test_unsigned_deliveries_get_401(
     assert '"github_webhook.rejected"' in capsys.readouterr().out
 
 
+def test_the_legacy_sha1_header_alone_is_not_enough(
+    account: str, tk_env: TokenKeeperEnv, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # GitHub sends both headers (seen on the live delivery); only SHA-256 counts.
+    version = _version(account)
+    assert run_github_webhook(github_delivery(headers={"X-Hub-Signature-256": None})) == 401
+    _assert_untouched(account, version, tk_env)
+    assert '"missing_signature"' in capsys.readouterr().out
+
+
+def test_the_recorded_delivery_has_the_shape_github_sent() -> None:
+    # Checked against a real delivery on 2026-11-20 (the fixture's _comment).
+    recorded = VECTORS["github_app_authorization"]
+    assert set(recorded["body"]) == {"action", "sender"}
+    assert recorded["body"]["action"] == "revoked"
+    assert isinstance(recorded["body"]["sender"]["id"], int)
+    assert {"X-Hub-Signature", "X-GitHub-Delivery", "X-GitHub-Event"} <= set(recorded["headers"])
+
+
 def test_the_signature_is_checked_before_the_body_is_parsed(
     account: str, tk_env: TokenKeeperEnv, capsys: pytest.CaptureFixture[str]
 ) -> None:

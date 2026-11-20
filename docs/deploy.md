@@ -19,7 +19,7 @@ Every command below assumes `AWS_PROFILE=token-keeper`, Node 22+, and a fresh La
 
 ## First deploy, in order
 
-1. **The budget, before anything else.** It's bootstrapless, so it needs no `cdk bootstrap`. The email is read from the main checkout's `.env.local`, never typed into a command:
+1. **The budget, before anything else.** It uses the legacy synthesizer (no assets, no bootstrap roles), so it needs no `cdk bootstrap`. The email is read from the main checkout's `.env.local`, never typed into a command:
    ```bash
    BUDGET_EMAIL="$(sed -n 's/^BUDGET_EMAIL=//p' .env.local)" npx cdk deploy Budget
    ```

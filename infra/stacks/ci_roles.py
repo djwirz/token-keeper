@@ -11,15 +11,16 @@ Two roles, each trusting exactly one GitHub OIDC subject:
 
 This stack is deployed by hand, once, from an admin session. CI never deploys it, so
 CI can't widen its own trust. It uses the L1 OIDC provider (the L2 one needs a
-custom-resource Lambda, which is an asset) and the bootstrapless synthesizer, so it
-deploys with no bootstrap bucket. ARNs are built from ``AWS::AccountId``, never a literal.
+custom-resource Lambda, which is an asset) and the legacy synthesizer, so it deploys
+with the operator's credentials and needs no bootstrap roles or bucket.
+ARNs are built from ``AWS::AccountId``, never a literal.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from aws_cdk import BootstraplessSynthesizer, CfnOutput, Duration, Stack
+from aws_cdk import CfnOutput, Duration, LegacyStackSynthesizer, Stack
 from aws_cdk import aws_iam as iam
 from constructs import Construct
 
@@ -36,7 +37,7 @@ DIFF_ASSUMES = ("lookup",)
 
 class CiRolesStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs: Any) -> None:
-        kwargs.setdefault("synthesizer", BootstraplessSynthesizer())
+        kwargs.setdefault("synthesizer", LegacyStackSynthesizer())
         super().__init__(scope, construct_id, **kwargs)
 
         provider = iam.CfnOIDCProvider(

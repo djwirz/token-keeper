@@ -617,14 +617,22 @@ def test_ci_roles_trust_one_github_subject_each_and_only_assume_bootstrap_roles(
     assert grants[by_name["Diff"]] == {("sts:AssumeRole", _bootstrap_role("lookup"))}
 
 
-def test_budget_and_ci_roles_deploy_without_a_bootstrap(
-    budget: Template, ci_roles: Template
-) -> None:
-    # Bootstrapless: no BootstrapVersion parameter or check, so Budget goes first.
-    for template in (budget, ci_roles):
-        rendered = template.to_json()
-        assert "BootstrapVersion" not in rendered.get("Parameters", {})
-        assert "CheckBootstrapVersion" not in rendered.get("Rules", {})
+def test_budget_and_ci_roles_deploy_without_a_bootstrap() -> None:
+    # What the CLI reads is the cloud assembly's manifest, not the template: it must
+    # name no role to assume and need no bootstrap stack, or the budget can't go first.
+    # (A template-only version of this test passed with BootstraplessSynthesizer, whose
+    # first real deploy then failed trying to assume the bootstrap deploy role.)
+    app = cdk.App()
+    BudgetStack(app, "Budget", email="ci@example.invalid", env=ENV)
+    CiRolesStack(app, "CiRoles", env=ENV)
+    assembly = app.synth()
+    for name in ("Budget", "CiRoles"):
+        stack = assembly.get_stack_by_name(name)
+        assert stack.assume_role_arn is None, name
+        assert stack.cloud_formation_execution_role_arn is None, name
+        assert stack.requires_bootstrap_stack_version is None, name
+        assert "BootstrapVersion" not in stack.template.get("Parameters", {}), name
+        assert stack.assets == [], name
 
 
 def test_no_template_holds_an_account_id(

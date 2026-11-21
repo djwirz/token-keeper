@@ -17,7 +17,18 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from token_keeper import crypto, delivery, github, ids, log, pages, settings, snapshot, sync
+from token_keeper import (
+    crypto,
+    delivery,
+    github,
+    ids,
+    log,
+    metrics,
+    pages,
+    settings,
+    snapshot,
+    sync,
+)
 from token_keeper.handlers._shared import crypto as kms
 from token_keeper.handlers._shared import encrypt_tokens, now, store
 from token_keeper.store import Identity, StateRecord, WriteConflict
@@ -79,6 +90,7 @@ def _back(return_to: str, result: str) -> pages.Response:
     return pages.redirect(f"{return_to}?result={result}")
 
 
+@metrics.flushed
 def handler(event: dict[str, Any], context: object) -> pages.Response:
     logger = log.start(handler="callback")
     cfg = settings.get()
@@ -88,11 +100,13 @@ def handler(event: dict[str, Any], context: object) -> pages.Response:
     state = query.get("state")
     if not state:
         logger.info("callback.rejected", extra={"reason": "missing_state"})
+        metrics.count(metrics.CONNECT_REJECTED)
         return pages.error_page()
     hashed = crypto.state_hash(state)
     record = store().take_state(hashed, current)
     if record is None:
         logger.info("callback.rejected", extra={"reason": "unknown_state"})
+        metrics.count(metrics.CONNECT_REJECTED)
         return pages.error_page()
     log.add_keys(correlation_id=record.correlation_id, app_id=record.app_id)
 
@@ -102,6 +116,7 @@ def handler(event: dict[str, Any], context: object) -> pages.Response:
     code = query.get("code")
     if not code:
         logger.info("callback.rejected", extra={"reason": "missing_code"})
+        metrics.count(metrics.CONNECT_REJECTED)
         return pages.error_page()
 
     verifier = kms().decrypt(record.pkce_verifier_ct, crypto.state_context(hashed))
@@ -122,6 +137,7 @@ def handler(event: dict[str, Any], context: object) -> pages.Response:
     try:
         outcome, account_id = save_connection(record, tokens, user, current)
     except WriteConflict:
+        # A race, not a forged or malformed request: not counted as ConnectRejected.
         logger.warning("callback.rejected", extra={"reason": "write_conflict"})
         return pages.error_page(409)
     if outcome == "already_linked" or account_id is None:

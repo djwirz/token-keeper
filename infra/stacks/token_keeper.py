@@ -43,6 +43,13 @@ the GitHub client ID from SSM at cold start (ADR 0014): no cross-stack reference
 The deliverer takes one message per invocation. Its 15 s timeout then always covers
 one worst-case POST (2 s connect + 5 s read + signing), so a slow receiver can't time
 out a whole batch and skip the backoff (PR 3 review).
+
+Observability (spec §8, ADR 0019): every Lambda has X-Ray active tracing (its own
+segment; no SDK) and prints EMF metrics to its log, so no role needs
+``cloudwatch:PutMetricData``. Three alarms notify the ``token-keeper-alarms`` topic on
+ALARM and on OK. The hand-deployed ``Alerts`` stack owns that topic and its email
+subscription; this stack only builds the topic's ARN from its name. One dashboard shows
+the metrics, the queues and each Lambda's errors.
 """
 
 from __future__ import annotations
@@ -52,6 +59,8 @@ from typing import Any
 from aws_cdk import CfnOutput, Duration, RemovalPolicy, Stack
 from aws_cdk import aws_apigatewayv2 as apigw
 from aws_cdk import aws_apigatewayv2_integrations as integrations
+from aws_cdk import aws_cloudwatch as cloudwatch
+from aws_cdk import aws_cloudwatch_actions as cloudwatch_actions
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_kms as kms
@@ -60,13 +69,21 @@ from aws_cdk import aws_lambda_event_sources as event_sources
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_scheduler as scheduler
 from aws_cdk import aws_scheduler_targets as scheduler_targets
+from aws_cdk import aws_sns as sns
 from aws_cdk import aws_sqs as sqs
 from aws_cdk import aws_ssm as ssm
 from constructs import Construct
 
-from infra.stacks.shared import CONNECT_URL_PARAM, GITHUB_CLIENT_ID_PARAM, RECEIVER_URL_PARAM
+from infra.stacks.shared import (
+    ALARM_TOPIC_NAME,
+    CONNECT_URL_PARAM,
+    GITHUB_CLIENT_ID_PARAM,
+    RECEIVER_URL_PARAM,
+)
+from token_keeper import metrics
 from token_keeper.handlers.deliverer import MAX_RECEIVES
 from token_keeper.handlers.worker import MAX_RECEIVES as SYNC_MAX_RECEIVES
+from token_keeper.log import SERVICE
 from token_keeper.store import DUE_INDEX, LEASE_SECONDS, TTL_ATTRIBUTE
 
 SSM_PREFIX = "/token-keeper/demo/token-keeper"
@@ -94,6 +111,14 @@ GHUSER_PREFIX = "GHUSER#"
 # What the planner's push_due names: its keys, the two attributes it sets, and the
 # state its condition reads. Nothing else, so never a token, expiry or lease field.
 PLANNER_ATTRIBUTES = ("PK", "SK", "next_due_at", "version", "state")
+# Alarms (spec §8, ADR 0019).
+ALARM_PERIOD = Duration.minutes(5)
+# RefreshFailed: one or more in any of the last 12 five-minute periods, i.e. in an hour.
+# Short periods fire within minutes, where one hour-long period would wait for the hour.
+REFRESH_FAILED_PERIODS = 12
+# The planner runs every 15 minutes: three empty 15-minute periods is 45 minutes without
+# a run, and three-of-three tolerates a run landing late in its period.
+PLANNER_MISSING_PERIODS = 3
 if WORKER_TIMEOUT_SECONDS >= LEASE_SECONDS:  # not an assert: python -O strips those
     raise ValueError("a worker must not outlive its lease (ADR 0015)")
 
@@ -220,9 +245,12 @@ class TokenKeeperStack(Stack):
                 memory_size=256,
                 timeout=Duration.seconds(timeout),
                 log_group=log_group,
+                # Each Lambda's own segment, from the runtime: no X-Ray SDK (ADR 0019).
+                tracing=lambda_.Tracing.ACTIVE,
                 environment={
                     "TOKEN_KEEPER_TABLE": table.table_name,
-                    "POWERTOOLS_SERVICE_NAME": "token-keeper",
+                    "POWERTOOLS_SERVICE_NAME": SERVICE,
+                    "POWERTOOLS_METRICS_NAMESPACE": metrics.NAMESPACE,
                     **environment,
                 },
             )
@@ -384,6 +412,168 @@ class TokenKeeperStack(Stack):
             string_value=f"{public_url}/connect",
             description="token-keeper: Token Keeper's /connect URL, read by the receiver",
         )
+        self._observability(
+            functions={
+                "Connect": connect,
+                "Callback": callback,
+                "GitHubWebhook": github_webhook,
+                "Planner": planner,
+                "Worker": worker,
+                "Deliverer": deliverer,
+            },
+            queues={"Sync": sync_queue, "Delivery": queue},
+            dlqs={"Sync": sync_dlq, "Delivery": dlq},
+        )
+
         CfnOutput(self, "ConnectUrl", value=f"{public_url}/connect")
         CfnOutput(self, "CallbackUrl", value=f"{public_url}/callback")
         CfnOutput(self, "GitHubWebhookUrl", value=f"{public_url}{GITHUB_WEBHOOK_PATH}")
+
+    def _observability(
+        self,
+        *,
+        functions: dict[str, lambda_.Function],
+        queues: dict[str, sqs.Queue],
+        dlqs: dict[str, sqs.Queue],
+    ) -> None:
+        """The three alarms and the dashboard (spec §8, ADR 0019)."""
+        topic = sns.Topic.from_topic_arn(
+            self,
+            "AlarmTopic",
+            self.format_arn(service="sns", resource=ALARM_TOPIC_NAME),
+        )
+        action = cloudwatch_actions.SnsAction(topic)
+
+        def app_metric(name: str, statistic: str = "Sum") -> cloudwatch.Metric:
+            return cloudwatch.Metric(
+                namespace=metrics.NAMESPACE,
+                metric_name=name,
+                dimensions_map={"service": SERVICE},
+                statistic=statistic,
+                period=ALARM_PERIOD,
+            )
+
+        def visible(queue: sqs.Queue) -> cloudwatch.Metric:
+            return queue.metric_approximate_number_of_messages_visible(
+                statistic="Maximum", period=ALARM_PERIOD
+            )
+
+        # 1. Either DLQ holds a message. FILL: a quiet queue can stop reporting.
+        dlq_alarm = cloudwatch.Alarm(
+            self,
+            "DlqMessagesAlarm",
+            alarm_name="token-keeper-dlq-messages",
+            alarm_description=(
+                "A dead-letter queue holds a message. Runbook: docs/runbook.md#dlq-messages"
+            ),
+            metric=cloudwatch.MathExpression(
+                expression="MAX([FILL(sync, 0), FILL(delivery, 0)])",
+                using_metrics={
+                    "sync": visible(dlqs["Sync"]),
+                    "delivery": visible(dlqs["Delivery"]),
+                },
+                label="Messages in the DLQs",
+                period=ALARM_PERIOD,
+            ),
+            threshold=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            evaluation_periods=1,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        # 2. GitHub rejected a refresh in the last hour.
+        refresh_alarm = cloudwatch.Alarm(
+            self,
+            "RefreshFailedAlarm",
+            alarm_name="token-keeper-refresh-failed",
+            alarm_description=(
+                "GitHub rejected a token refresh in the last hour. "
+                "Runbook: docs/runbook.md#refresh-failed"
+            ),
+            metric=app_metric(metrics.REFRESH_FAILED),
+            threshold=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+            evaluation_periods=REFRESH_FAILED_PERIODS,
+            datapoints_to_alarm=1,
+            treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
+        )
+        # 3. The planner hasn't run for 45 minutes. No data at all is the failure itself.
+        planner_alarm = cloudwatch.Alarm(
+            self,
+            "PlannerMissingAlarm",
+            alarm_name="token-keeper-planner-missing",
+            alarm_description=(
+                "The planner hasn't run for 45 minutes. Runbook: docs/runbook.md#planner-missing"
+            ),
+            metric=functions["Planner"].metric_invocations(
+                statistic="Sum", period=Duration.minutes(15)
+            ),
+            threshold=1,
+            comparison_operator=cloudwatch.ComparisonOperator.LESS_THAN_THRESHOLD,
+            evaluation_periods=PLANNER_MISSING_PERIODS,
+            datapoints_to_alarm=PLANNER_MISSING_PERIODS,
+            treat_missing_data=cloudwatch.TreatMissingData.BREACHING,
+        )
+        alarms = (dlq_alarm, refresh_alarm, planner_alarm)
+        for alarm in alarms:
+            # OK too: the email that says it was put back.
+            alarm.add_alarm_action(action)
+            alarm.add_ok_action(action)
+
+        def graph(title: str, *left: cloudwatch.IMetric, width: int = 8) -> cloudwatch.GraphWidget:
+            return cloudwatch.GraphWidget(title=title, left=list(left), width=width, height=6)
+
+        cloudwatch.Dashboard(
+            self,
+            "Dashboard",
+            dashboard_name="token-keeper",
+            default_interval=Duration.days(1),
+            widgets=[
+                [cloudwatch.AlarmStatusWidget(title="Alarms", alarms=list(alarms), width=24)],
+                [
+                    graph(
+                        "Refreshes",
+                        app_metric(metrics.REFRESH_SUCCEEDED),
+                        app_metric(metrics.REFRESH_FAILED),
+                    ),
+                    graph(
+                        "Syncs",
+                        app_metric(metrics.SYNC_SUCCEEDED),
+                        app_metric(metrics.SYNC_FAILED),
+                        app_metric(metrics.ACCOUNTS_DUE),
+                    ),
+                    graph(
+                        "Deliveries",
+                        app_metric(metrics.DELIVERY_SUCCEEDED),
+                        app_metric(metrics.DELIVERY_FAILED),
+                    ),
+                ],
+                [
+                    graph(
+                        "Delivery latency (ms)",
+                        app_metric(metrics.DELIVERY_LATENCY, "p50"),
+                        app_metric(metrics.DELIVERY_LATENCY, "Maximum"),
+                    ),
+                    graph(
+                        "Rejections and revocations",
+                        app_metric(metrics.CONNECT_REJECTED),
+                        app_metric(metrics.GITHUB_WEBHOOK_REJECTED),
+                        app_metric(metrics.REVOCATION_RECEIVED),
+                    ),
+                    graph(
+                        "Queue depth (visible)",
+                        *(visible(q).with_(label=f"{name} queue") for name, q in queues.items()),
+                        *(visible(q).with_(label=f"{name} DLQ") for name, q in dlqs.items()),
+                    ),
+                ],
+                [
+                    graph(
+                        "Lambda errors",
+                        *(
+                            fn.metric_errors(statistic="Sum", period=ALARM_PERIOD).with_(label=name)
+                            for name, fn in functions.items()
+                        ),
+                        width=24,
+                    )
+                ],
+            ],
+        )

@@ -12,13 +12,14 @@ After ``MAX_RECEIVES`` attempts (about a day) SQS moves it to the DLQ.
 from __future__ import annotations
 
 import json
+import time
 from functools import cache
 from typing import TYPE_CHECKING, Any
 
 import boto3
 import httpx
 
-from token_keeper import log, settings
+from token_keeper import log, metrics, settings
 from token_keeper.contract import webhooks
 from token_keeper.contract.events import (
     AccountEvent,
@@ -122,13 +123,21 @@ def deliver(record: dict[str, Any]) -> bool:
         status = None
         logger.warning("delivery.failed", extra={"reason": type(exc).__name__})
     if status is not None and 200 <= status < 300:
+        metrics.count(metrics.DELIVERY_SUCCEEDED)
+        sent = (record.get("attributes") or {}).get("SentTimestamp")
+        if sent:
+            # How long the main app waited: from the first enqueue, retries included.
+            waited = max(time.time() * 1000 - int(sent), 0)
+            metrics.milliseconds(metrics.DELIVERY_LATENCY, waited)
         logger.info("delivery.succeeded", extra={"status": status, "version": event.version})
         return True
     if status is not None:
         logger.warning("delivery.failed", extra={"reason": f"http_{status}"})
+    metrics.count(metrics.DELIVERY_FAILED)
     return False
 
 
+@metrics.flushed
 def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
     failures: list[dict[str, str]] = []
     for record in event.get("Records", []):
@@ -136,6 +145,7 @@ def handler(event: dict[str, Any], context: object) -> dict[str, Any]:
             done = deliver(record)
         except Exception:
             log.get_logger().exception("delivery.error")
+            metrics.count(metrics.DELIVERY_FAILED)
             done = False
         if done:
             continue

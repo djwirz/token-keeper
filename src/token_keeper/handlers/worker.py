@@ -39,8 +39,9 @@ MAX_RECEIVES = 3
 class _Sync:
     """One sync of one leased account."""
 
-    def __init__(self, leased: LeasedAccount, correlation_id: str) -> None:
+    def __init__(self, leased: LeasedAccount, correlation_id: str, interval: int) -> None:
         self.leased = leased
+        self.interval = interval
         self.correlation_id = correlation_id
         self.context = crypto.account_context(leased.account.account_id)
         self.refreshed = False
@@ -123,7 +124,7 @@ class _Sync:
             self.leased,
             login=user.login,
             snapshot=snapshot.build(user, current, events),
-            next_due_at=sync.next_sync_at(current),
+            next_due_at=sync.next_sync_at(current, self.interval),
         )
         self.send_event()
         metrics.count(metrics.SYNC_SUCCEEDED)
@@ -157,6 +158,9 @@ class _Sync:
 
 def sync_account(account_id: str, correlation_id: str) -> None:
     logger = log.start(handler="worker", account_id=account_id, correlation_id=correlation_id)
+    # The demo cadence knob (ADR 0020), read before the lease so a slow SSM read never
+    # spends lease time between the GitHub calls and the final write (PR 11 review).
+    interval = sync.sync_interval_seconds()
     leased = store().take_lease(account_id, ids.new("wrk"), now())
     if leased is None:
         # Another worker holds the lease, or the account isn't active. Drop the message:
@@ -165,7 +169,7 @@ def sync_account(account_id: str, correlation_id: str) -> None:
         return
     log.add_keys(app_id=leased.account.app_id)
     try:
-        _Sync(leased, correlation_id).run()
+        _Sync(leased, correlation_id, interval).run()
     except LeaseLost:
         # A reconnect or revocation took over mid-sync; its write holds the right state.
         logger.warning("lease_lost")

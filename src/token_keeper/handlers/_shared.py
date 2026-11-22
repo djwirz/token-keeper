@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from functools import cache
 
-from token_keeper import settings
+from token_keeper import settings, sync
 from token_keeper.crypto import Crypto, account_context
 from token_keeper.github import TokenPair
 from token_keeper.store import EncryptedTokens, Store
@@ -39,5 +39,6 @@ def encrypt_tokens(account_id: str, tokens: TokenPair) -> EncryptedTokens:
 def reset() -> None:
     """Forget cached config and clients (tests and the local runner)."""
     settings.get.cache_clear()
+    sync.reset_interval_cache()
     store.cache_clear()
     crypto.cache_clear()

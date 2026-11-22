@@ -2,7 +2,13 @@
 
 Keeps third-party account connections alive: stores OAuth tokens, refreshes or re-verifies them on a schedule, and reports each account's state to a main app through one signed endpoint. First provider: GitHub.
 
-**Status:** building, slice 6 of 7 (observability). Design: [docs/spec.md](docs/spec.md) and [docs/adr/](docs/adr/).
+**Status:** building, slice 7 of 7 (demo polish). Design: [docs/spec.md](docs/spec.md) and [docs/adr/](docs/adr/). How it was built, and where AI got it wrong: [docs/case-study.md](docs/case-study.md).
+
+<!-- The demo GIF (connect, a scheduled sync, revoke, reconnect) goes here in slice 7's live-proof PR. -->
+
+## Why GitHub
+
+Instagram Login's long-lived token and a GitHub App's user tokens pose the same problem: a credential that lapses at a hard cliff unless it's renewed in time, and re-auth as the only way back. Instagram uses one 60-day token that you refresh yourself; GitHub splits it into an 8-hour access token and a 6-month refresh token. A connector for either has to track expiry, renew well before the cliff, tell a passing error from a user who's gone, and tell the product. GitHub adds one twist: each refresh token works only once, so two concurrent refreshes would lose the account, and the worker refreshes only under a lease. The comparison and the alternatives are in [ADR 0002](docs/adr/0002-github-app-with-expiring-user-tokens.md).
 
 ## Run it locally
 
@@ -24,7 +30,7 @@ uv sync
 uv run python -m local.run
 ```
 
-Open http://localhost:8000, enter the demo passcode (in `.env.local`) and approve the app on GitHub. You come back to the status page with `?result=connected`, and your profile appears once the deliverer has posted `account.connected` (a second or so). The callback also enqueues an immediate sync, so your recent public activity follows a moment later. The runner runs the planner every 30 seconds in place of the 15-minute schedule. To force a real refresh-token rotation without waiting 8 hours, `curl -X POST http://127.0.0.1:8002/expire`: it marks access tokens as expired and runs the planner, so the next sync refreshes against GitHub. Token Keeper runs on :8001; without the GitHub App values only the receiver starts. Data lives in memory and is gone when the runner stops.
+Open http://localhost:8000, enter the demo passcode (in `.env.local`) and approve the app on GitHub. You come back to the status page with `?result=connected`, and your profile appears once the deliverer has posted `account.connected` (a second or so). The callback also enqueues an immediate sync, so your recent public activity follows a moment later. The runner runs the planner every 30 seconds in place of the 15-minute schedule. Accounts sync about every six hours; to watch scheduled syncs locally, add `SYNC_INTERVAL_MINUTES=15` to `.env.local` (15 to 360, [ADR 0020](docs/adr/0020-demo-cadence-knob-in-ssm.md)). To force a real refresh-token rotation without waiting 8 hours, `curl -X POST http://127.0.0.1:8002/expire`: it marks access tokens as expired and runs the planner, so the next sync refreshes against GitHub. Token Keeper runs on :8001; without the GitHub App values only the receiver starts. Data lives in memory and is gone when the runner stops.
 
 To send signed synthetic events straight to the receiver instead:
 

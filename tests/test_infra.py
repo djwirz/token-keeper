@@ -30,6 +30,7 @@ from infra.stacks.shared import (
 from infra.stacks.token_keeper import (
     DELIVERER_BATCH_SIZE,
     PLANNER_ATTRIBUTES,
+    SYNC_INTERVAL_PARAM,
     WORKER_BATCH_SIZE,
     WORKER_TIMEOUT_SECONDS,
     TokenKeeperStack,
@@ -287,6 +288,7 @@ def test_each_role_has_exactly_what_its_handler_needs(token_keeper: Template) ->
     planner_id = _logical_id(token_keeper, "AWS::Lambda::Function", "Planner")
     table, key, queue = f"${{{table_id}.Arn}}", f"${{{key_id}.Arn}}", f"${{{queue_id}.Arn}}"
     sync_queue = f"${{{sync_id}.Arn}}"
+    knob_id = _logical_id(token_keeper, "AWS::SSM::Parameter", "SyncIntervalParam")
     send = {"sqs:SendMessage", "sqs:GetQueueAttributes", "sqs:GetQueueUrl"}
     consume = {
         "sqs:ReceiveMessage",
@@ -345,7 +347,10 @@ def test_each_role_has_exactly_what_its_handler_needs(token_keeper: Template) ->
         | {(a, sync_queue) for a in consume}
         | {(a, queue) for a in send}
         | ssm(TK_SECRET_PARAMS["GITHUB_CLIENT_SECRET_PARAM"])
-        | ssm(GITHUB_CLIENT_ID_PARAM),
+        | ssm(GITHUB_CLIENT_ID_PARAM)
+        # The demo cadence knob (ADR 0020): only the worker reads it. The stack creates
+        # it, so the grant names it by reference.
+        | ssm(f"${{{knob_id}}}"),
         # Spec §6.4, ADR 0018: read a GitHub link, take over the account, enqueue. No KMS.
         "token_keeper.handlers.github_webhook.handler": {
             ("dynamodb:GetItem", table),
@@ -838,3 +843,20 @@ def test_the_dashboard_shows_every_metric_and_each_lambdas_errors(
         assert f'\\"{name}\\"' in body, name
     assert body.count('\\"Errors\\"') == 6
     assert body.count('\\"ApproximateNumberOfMessagesVisible\\"') == 4
+
+
+def test_the_cadence_knob_starts_at_six_hours_and_only_the_worker_reads_it(
+    token_keeper: Template,
+) -> None:
+    token_keeper.has_resource_properties(
+        "AWS::SSM::Parameter",
+        {"Name": SYNC_INTERVAL_PARAM, "Type": "String", "Value": "360"},
+    )
+    worker = _function(token_keeper, "worker")
+    assert (
+        worker["Properties"]["Environment"]["Variables"]["SYNC_INTERVAL_MINUTES_PARAM"]
+        == SYNC_INTERVAL_PARAM
+    )
+    for module in ("connect", "callback", "deliverer", "planner", "github_webhook"):
+        variables = _function(token_keeper, module)["Properties"]["Environment"]["Variables"]
+        assert "SYNC_INTERVAL_MINUTES_PARAM" not in variables, module

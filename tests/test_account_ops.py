@@ -31,7 +31,7 @@ from tests.tk_flow import (
     run_worker,
     scan_table,
 )
-from token_keeper import metrics
+from token_keeper import metrics, sync
 from token_keeper.handlers import _shared
 from token_keeper.store import Store
 
@@ -178,7 +178,7 @@ def test_a_worker_mid_sync_cannot_bring_a_deleted_account_back(
     Store(TK_TABLE).delete_account(account_id)
 
     with pytest.raises(LeaseLost):
-        worker._Sync(leased, "cor_test").run()
+        worker._Sync(leased, "cor_test", sync.DEFAULT_SYNC_INTERVAL_SECONDS).run()
     assert scan_table(TK_TABLE) == []
 
 

@@ -11,15 +11,25 @@ from __future__ import annotations
 import os
 
 import boto3
+from botocore.config import Config
 
 
 def env_or_ssm(name: str) -> str:
+    value = optional_env_or_ssm(name)
+    if value is None:
+        raise RuntimeError(f"set {name} or {name}_PARAM")
+    return value
+
+
+def optional_env_or_ssm(name: str, config: Config | None = None) -> str | None:
+    """Like ``env_or_ssm``, but ``None`` when neither variable is set. ``config`` sets
+    the SSM client's timeouts and retries (botocore's defaults wait up to a minute)."""
     direct = os.environ.get(name)
     if direct:
         return direct
     param = os.environ.get(f"{name}_PARAM")
     if not param:
-        raise RuntimeError(f"set {name} or {name}_PARAM")
-    ssm = boto3.client("ssm")
+        return None
+    ssm = boto3.client("ssm", config=config)
     value: str = ssm.get_parameter(Name=param, WithDecryption=True)["Parameter"]["Value"]
     return value

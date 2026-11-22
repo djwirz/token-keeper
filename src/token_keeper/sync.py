@@ -8,17 +8,32 @@ from __future__ import annotations
 
 import json
 import secrets
+import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 
+from token_keeper import log
 from token_keeper.delivery import CORRELATION_ATTRIBUTE
+from token_keeper.ssm import optional_env_or_ssm
 
 if TYPE_CHECKING:
     from mypy_boto3_sqs import SQSClient
 
-SYNC_INTERVAL_SECONDS = 6 * 60 * 60
-JITTER_SECONDS = 30 * 60
+DEFAULT_SYNC_INTERVAL_SECONDS = 6 * 60 * 60
+# The demo cadence knob (ADR 0020): minutes, from SYNC_INTERVAL_MINUTES locally or the
+# parameter SYNC_INTERVAL_MINUTES_PARAM names in AWS. Never below the planner's 15-minute
+# rate (a shorter value would buy nothing) and never above the normal six hours.
+SYNC_INTERVAL_SETTING = "SYNC_INTERVAL_MINUTES"
+MIN_SYNC_INTERVAL_MINUTES = 15
+MAX_SYNC_INTERVAL_MINUTES = DEFAULT_SYNC_INTERVAL_SECONDS // 60
+# Re-read at most this often, so a change lands within a minute without a cold start.
+INTERVAL_CACHE_SECONDS = 60
+# Jitter is ±30 minutes, or a quarter of the interval when that's smaller, so a short
+# demo cadence isn't swamped by it.
+MAX_JITTER_SECONDS = 30 * 60
 # The planner pushes a due account this far ahead before enqueueing it, so the next
 # run (every 15 minutes) doesn't enqueue it again while it's still in the queue.
 PLANNER_PUSH_SECONDS = 30 * 60
@@ -30,9 +45,56 @@ FIRST_BACKOFF_SECONDS = 15 * 60
 MAX_BACKOFF_SECONDS = 60 * 60
 
 
-def next_sync_at(now: int) -> int:
-    """Six hours on, give or take half an hour, so accounts spread out."""
-    return now + SYNC_INTERVAL_SECONDS + secrets.randbelow(2 * JITTER_SECONDS + 1) - JITTER_SECONDS
+_interval_cache: tuple[float, int] | None = None  # (when it was read, seconds)
+
+
+def jitter_seconds(interval: int) -> int:
+    return min(MAX_JITTER_SECONDS, interval // 4)
+
+
+def sync_interval_seconds(clock: Callable[[], float] = time.monotonic) -> int:
+    """The current sync interval, re-read at most once a minute."""
+    global _interval_cache
+    read_at = clock()
+    if _interval_cache is not None and read_at - _interval_cache[0] < INTERVAL_CACHE_SECONDS:
+        return _interval_cache[1]
+    interval = _read_interval()
+    _interval_cache = (read_at, interval)
+    return interval
+
+
+def reset_interval_cache() -> None:
+    global _interval_cache
+    _interval_cache = None
+
+
+def _read_interval() -> int:
+    """The knob's value in seconds. A missing, unreadable or bad knob never stops syncs:
+    it means the normal six hours."""
+    try:
+        raw = optional_env_or_ssm(SYNC_INTERVAL_SETTING)
+    except (BotoCoreError, ClientError) as exc:
+        log.get_logger().warning("sync.interval_unreadable", extra={"error": type(exc).__name__})
+        return DEFAULT_SYNC_INTERVAL_SECONDS
+    if raw is None:
+        return DEFAULT_SYNC_INTERVAL_SECONDS
+    try:
+        minutes = int(raw.strip())
+    except ValueError:
+        minutes = 0
+    if not MIN_SYNC_INTERVAL_MINUTES <= minutes <= MAX_SYNC_INTERVAL_MINUTES:
+        log.get_logger().warning("sync.interval_invalid", extra={"value": raw[:16]})
+        return DEFAULT_SYNC_INTERVAL_SECONDS
+    return minutes * 60
+
+
+def next_sync_at(now: int, interval: int | None = None) -> int:
+    """One interval on (six hours unless the demo knob says otherwise), with jitter so
+    accounts spread out."""
+    if interval is None:
+        interval = sync_interval_seconds()
+    jitter = jitter_seconds(interval)
+    return now + interval + secrets.randbelow(2 * jitter + 1) - jitter
 
 
 def backoff_until(now: int, consecutive_failures: int) -> int:

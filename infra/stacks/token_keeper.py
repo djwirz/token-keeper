@@ -94,6 +94,10 @@ SECRET_PARAMS = {
     # The GitHub App's webhook secret, for inbound deliveries (slice 5, ADR 0018).
     "GITHUB_WEBHOOK_SECRET_PARAM": f"{SSM_PREFIX}/github-webhook-secret",
 }
+# The demo cadence knob (ADR 0020): a plain String TokenKeeper creates at the normal six
+# hours. It is set by hand only while recording the README GIF, then put back.
+SYNC_INTERVAL_PARAM = f"{SSM_PREFIX}/sync-interval-minutes"
+SYNC_INTERVAL_DEFAULT_MINUTES = "360"
 THROTTLE = {"rate": 5, "burst": 10}
 DELIVERER_TIMEOUT_SECONDS = 15
 DELIVERER_BATCH_SIZE = 1
@@ -357,8 +361,19 @@ class TokenKeeperStack(Stack):
                 "DELIVERY_QUEUE_URL": queue.queue_url,
                 "GITHUB_CLIENT_ID_PARAM": GITHUB_CLIENT_ID_PARAM,
                 "GITHUB_CLIENT_SECRET_PARAM": SECRET_PARAMS["GITHUB_CLIENT_SECRET_PARAM"],
+                "SYNC_INTERVAL_MINUTES_PARAM": SYNC_INTERVAL_PARAM,
             },
         )
+        ssm.StringParameter(
+            self,
+            "SyncIntervalParam",
+            parameter_name=SYNC_INTERVAL_PARAM,
+            string_value=SYNC_INTERVAL_DEFAULT_MINUTES,
+            description=(
+                "token-keeper: demo cadence knob, minutes between syncs (15-360). "
+                "Set by hand only to record the README GIF, then back to 360 (ADR 0020)"
+            ),
+        ).grant_read(worker)
         key.grant(worker, "kms:Encrypt", "kms:Decrypt")
         grant_table(
             worker,

@@ -141,9 +141,21 @@ def test_sync_with_a_valid_token_makes_no_token_call(
     assert int(item["version"]["N"]) == before + 2
     assert not {"lease_owner", "lease_until", "last_error_code"} & set(item)
     due = int(item["next_due_at"]["N"]) - time.time()
-    assert due >= sync.SYNC_INTERVAL_SECONDS - sync.JITTER_SECONDS - 5
-    assert due <= sync.SYNC_INTERVAL_SECONDS + sync.JITTER_SECONDS + 5
+    # Six hours ± 30 minutes: the knob is unset, so the normal cadence (ADR 0020).
+    assert due >= 6 * 3600 - 30 * 60 - 5
+    assert due <= 6 * 3600 + 30 * 60 + 5
     assert _events(tk_env) == ["account.updated"]
+
+
+def test_the_demo_knob_shortens_the_next_sync(
+    acc: Connected, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SYNC_INTERVAL_MINUTES", "15")
+    sync.reset_interval_cache()
+    assert run_worker(acc.account_id) == {"batchItemFailures": []}
+    due = int(account_item(acc.account_id)["next_due_at"]["N"]) - time.time()
+    # 15 minutes ± a quarter of that.
+    assert 15 * 60 - 225 - 5 <= due <= 15 * 60 + 225 + 5
 
 
 def test_the_event_carries_the_synced_snapshot(acc: Connected) -> None:

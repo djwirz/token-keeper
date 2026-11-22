@@ -138,6 +138,29 @@ aws scheduler update-schedule --cli-input-json "file://$DIR/disabled.json"
 ```
 Re-enable it as soon as the ALARM email arrives, with the same jq and `"ENABLED"`. Then check `get-schedule` matches the saved copy apart from `LastModificationDate`, and run drift detection (runbook, "Planner missing"). While it's off, no account syncs on schedule; the first run after picks them all up.
 
+## Recording the README GIF (slice 7)
+
+The GIF shows acceptance criterion 1 (spec §11) on the deployed `demo`: connect, a *scheduled* sync, revocation and reconnect. Dan records it with their own screen recorder, in their own browser, where they're already signed in to GitHub.
+
+**Before recording:**
+1. Set the cadence knob to 15 minutes (runbook, "Sync cadence knob"). This is a hand change to AWS, so ask first.
+2. Check the demo account has public GitHub activity from the last few weeks, so the card isn't empty (spec §5).
+
+**Shot list,** one take or several, cut together:
+1. **The status page,** with the card as it stands.
+2. **Connect:** unlock with the passcode, click Connect, approve on GitHub. Back on the page, the profile and recent activity appear. The reconnect also applies the 15-minute knob from here on.
+3. **A scheduled sync:** wait for it, then reload. Show "Last synced" moving on. Cut the wait: it can be anything from about 15 to 30 minutes.
+4. **Revoke:** GitHub → Settings → Applications → Authorized GitHub Apps → revoke the app. Back on the page, reload: the card says "needs re-auth" within seconds.
+5. **Reconnect:** Connect again, approve, and the card is back to active.
+
+**Recording rules:**
+- The browser window only, with no bookmarks bar, other tabs or extensions showing.
+- No email address, AWS console, account ID or passcode in frame. Type the passcode off-camera, or cut that part.
+- Aim for under about 30 seconds and a few MB once it's a GIF.
+- Hand the raw recording over as a file. It's trimmed, scaled and checked frame by frame before it goes in `docs/media/`.
+
+**After recording:** set the knob back to 360 and check drift (runbook, "Sync cadence knob").
+
 ## Forcing a refresh (proof, not routine)
 
 A real refresh normally waits for the 8-hour access token to come within 10 minutes of expiry. To see one now, make the account due with an expiring token. That's an operator write, and it bumps `version` like every write (ADR 0015):

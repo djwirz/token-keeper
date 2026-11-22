@@ -14,12 +14,20 @@ import boto3
 
 
 def env_or_ssm(name: str) -> str:
+    value = optional_env_or_ssm(name)
+    if value is None:
+        raise RuntimeError(f"set {name} or {name}_PARAM")
+    return value
+
+
+def optional_env_or_ssm(name: str) -> str | None:
+    """Like ``env_or_ssm``, but ``None`` when neither variable is set."""
     direct = os.environ.get(name)
     if direct:
         return direct
     param = os.environ.get(f"{name}_PARAM")
     if not param:
-        raise RuntimeError(f"set {name} or {name}_PARAM")
+        return None
     ssm = boto3.client("ssm")
     value: str = ssm.get_parameter(Name=param, WithDecryption=True)["Parameter"]["Value"]
     return value

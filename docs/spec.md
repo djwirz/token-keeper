@@ -78,7 +78,7 @@ Rationale and alternatives: [ADR 0004](adr/0004-planner-sqs-worker-schedule.md).
 - Normal: every **6 hours** per active account, with jitter so accounts spread out.
 - If the access token expires in under 10 minutes when a sync runs, the worker refreshes first. With an 8-hour token and a 6-hour cadence, about half of syncs find a still-valid token and the other half refresh. That keeps the refresh token rotating far inside its 6-month life.
 - After a transient error, the account stays `active` and `next_due_at` backs off 15, 30, then 60 minutes, capped there (or set to the rate-limit reset time). Details: [ADR 0015](adr/0015-sync-worker-failures-and-lease-budget.md).
-- Demo knob: a config value can shorten the cadence (e.g. 15 minutes) for recording the GIF.
+- Demo knob: an SSM parameter (whole minutes, 15 to 360, normally 360) shortens the cadence while the GIF is recorded, then goes back. The worker re-reads it every minute, and a bad value means six hours. Details: [ADR 0020](adr/0020-demo-cadence-knob-in-ssm.md).
 
 ### Writes and the lease
 Every change to an Account item is a conditional write that bumps `version`, the planner's push and the lease included, so versions can skip numbers. There are two kinds of writer:
@@ -269,11 +269,11 @@ Slices 1–3 are local only. Each one also adds the CDK code for what it builds,
 4. **First deploy:** the Budget stack first, then the OIDC deploy roles, then `DemoReceiver` and `TokenKeeper` with everything built so far (no second receiver deploy: URLs go through SSM, ADR 0014). Fix what real IAM, Scheduler and SQS wiring turn up. Prove or drop the IAM narrowing put off until now. Ends with a deployed connect, a deployed sync and one real refresh.
 5. **Revocation webhook:** `github-webhook` λ, tested locally with recorded deliveries, then live in `demo` with the instant flip to `needs_reauth`. Deploys stay on CI: the PR merges on local tests, CI deploys it, and the live revocation, the IAM probe and any fixes follow in a small PR ([ADR 0018](adr/0018-revocation-webhook-redeliveries-and-trust.md)). Proven live on 2026-11-20: revoke, flip, redeliver, reconnect, redeliver.
 6. **Observability:** metrics, traces, dashboard, alarms (each forced once), runbook ([ADR 0019](adr/0019-observability-as-built.md)). Deploys stay on CI, as in slice 5: the PR merges on local tests, Dan deploys `Alerts` by hand and confirms the email, CI deploys the rest, and the alarm drills and any fixes follow in a small PR. Proven live on 2026-11-21 and 22: each alarm fired and recovered with its emails, and the redrive worked (ADR 0019, "Proven live").
-7. **Demo polish:** cadence knob, README GIF, case-study notes.
+7. **Demo polish:** cadence knob, README GIF, case-study notes ([ADR 0020](adr/0020-demo-cadence-knob-in-ssm.md), [docs/case-study.md](case-study.md)). As in slices 5 and 6, the PR merges on local tests and CI deploys it. Then the knob is shortened by hand, Dan records the GIF, the knob goes back, and the GIF and what the run showed follow in a small PR.
 
 The trade-off: IAM and wiring surprises all land in slice 4 instead of spread across slices. With nothing live and one user, that's accepted. If slice 4 looks too big while slice 2 is in progress, deploy the receiver alone at the end of slice 2.
 
 ## 13. Open questions
 
 1. **Roadmap wording.** The build-plan roadmap says "Terraform". With [ADR 0006](adr/0006-aws-cdk-python-for-iac.md), that becomes "IaC (CDK, Python)". The roadmap needs updating outside this repo.
-2. **Case-study angle.** How much of the Instagram comparison goes in the README versus only in ADR 0002? Not blocking; decide in slice 7.
+2. **Case-study angle.** Decided in slice 7: the README gets one short paragraph on the shape GitHub's expiring tokens share with Instagram's long-lived ones, and links ADR 0002 for the rest.

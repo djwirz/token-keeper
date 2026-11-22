@@ -1,6 +1,6 @@
 # token-keeper runbook
 
-What to do when an alarm email arrives, and how to delete an account's data on request. The alarms are described in spec §8 and [ADR 0019](adr/0019-observability-as-built.md). Every alarm emails on ALARM and again on OK, from the `token-keeper-alarms` topic in the hand-deployed `Alerts` stack.
+What to do when an alarm email arrives, how to set the demo's cadence knob, and how to delete an account's data on request. The alarms are described in spec §8 and [ADR 0019](adr/0019-observability-as-built.md). Every alarm emails on ALARM and again on OK, from the `token-keeper-alarms` topic in the hand-deployed `Alerts` stack.
 
 Everything below assumes `AWS_PROFILE=token-keeper` (after `aws login --profile token-keeper`) and region `us-east-1`. Nothing here prints a token. Keep the account ID out of anything you paste elsewhere.
 
@@ -117,6 +117,29 @@ aws cloudformation describe-stack-resource-drifts --stack-name TokenKeeper --sta
 ```
 
 That should list nothing. If the schedule shows as `NOT_CHECKED` (CloudFormation's drift detection doesn't cover every resource type), compare `get-schedule` with the template instead: same expression, flexible window, target and retry policy, and `ENABLED`. The next run (within 15 minutes) logs `planner.enqueued`. Accounts that came due while it was off are all picked up on that run, since the due index has no window. The alarm clears within about fifteen minutes of that run: one period with an invocation breaks the three-of-three.
+
+## Sync cadence knob
+
+Not an alarm: the demo's one hand-set value ([ADR 0020](adr/0020-demo-cadence-knob-in-ssm.md)). Normally every account syncs about every six hours. The parameter below shortens that, in whole minutes from 15 to 360, and exists only to record the README GIF. Anything outside that range means six hours and a `sync.interval_invalid` warning in the worker's log.
+
+**Read it.**
+```bash
+KNOB=/token-keeper/demo/token-keeper/sync-interval-minutes
+aws ssm get-parameter --name "$KNOB" --query Parameter.Value --output text
+```
+It should say `360`.
+
+**Shorten it (a hand change to AWS: ask first).**
+```bash
+aws ssm put-parameter --name "$KNOB" --value 15 --overwrite
+```
+Warm workers pick it up within a minute. It applies from each account's *next* sync, so an account synced under six hours stays due up to six hours away. A reconnect applies it at once, because the callback's immediate sync sets the next due time. With the planner running every 15 minutes, expect a sync roughly every 15 to 30 minutes. While the knob is short, more metrics are emitted every hour (spec §8), so don't leave it.
+
+**Put it back,** as soon as the recording is done:
+```bash
+aws ssm put-parameter --name "$KNOB" --value 360 --overwrite
+```
+Accounts already due within the short interval sync once more, then go back to six hours. A CI deploy doesn't put the value back unless the parameter's template changes. Then check drift (the commands are under "Planner missing" above): nothing should be listed.
 
 ## Deleting an account's data on request
 

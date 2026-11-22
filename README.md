@@ -8,7 +8,7 @@ Keeps third-party account connections alive: stores OAuth tokens, refreshes or r
 
 ## Why GitHub
 
-GitHub App user tokens have the same shape as Instagram's long-lived tokens (Instagram Login): a short-lived credential, a renewal credential with a hard cliff, and re-auth as the only way back once it lapses. A connector for either has to track expiry, renew well before the cliff, tell a passing error from a user who's gone, and tell the product. GitHub adds one twist: each refresh token works only once, so two concurrent refreshes would lose the account, and the worker refreshes only under a lease. The comparison and the alternatives are in [ADR 0002](docs/adr/0002-github-app-with-expiring-user-tokens.md).
+Instagram Login's long-lived token and a GitHub App's user tokens pose the same problem: a credential that lapses at a hard cliff unless it's renewed in time, and re-auth as the only way back. Instagram uses one 60-day token that you refresh yourself; GitHub splits it into an 8-hour access token and a 6-month refresh token. A connector for either has to track expiry, renew well before the cliff, tell a passing error from a user who's gone, and tell the product. GitHub adds one twist: each refresh token works only once, so two concurrent refreshes would lose the account, and the worker refreshes only under a lease. The comparison and the alternatives are in [ADR 0002](docs/adr/0002-github-app-with-expiring-user-tokens.md).
 
 ## Run it locally
 

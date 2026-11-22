@@ -35,7 +35,7 @@ from tests.tk_flow import (
 )
 from token_keeper import sync
 from token_keeper.contract.events import parse_event
-from token_keeper.handlers import deliverer, worker
+from token_keeper.handlers import _shared, deliverer, worker
 from token_keeper.store import Account, EncryptedTokens, LeasedAccount, LeaseLost, Store
 
 TOKEN_FIELDS = {"access_token_ct", "refresh_token_ct", "access_expires_at", "refresh_expires_at"}
@@ -150,12 +150,22 @@ def test_sync_with_a_valid_token_makes_no_token_call(
 def test_the_demo_knob_shortens_the_next_sync(
     acc: Connected, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # No cache reset here: the tk_env fixture's _shared.reset() must clear the knob's
+    # cache, or this value would leak into the next test (PR 11 review).
     monkeypatch.setenv("SYNC_INTERVAL_MINUTES", "15")
-    sync.reset_interval_cache()
     assert run_worker(acc.account_id) == {"batchItemFailures": []}
     due = int(account_item(acc.account_id)["next_due_at"]["N"]) - time.time()
     # 15 minutes ± a quarter of that.
     assert 15 * 60 - 225 - 5 <= due <= 15 * 60 + 225 + 5
+
+
+def test_resetting_handler_state_forgets_the_knob(monkeypatch: pytest.MonkeyPatch) -> None:
+    sync.reset_interval_cache()
+    monkeypatch.setenv("SYNC_INTERVAL_MINUTES", "15")
+    assert sync.sync_interval_seconds() == 900
+    monkeypatch.delenv("SYNC_INTERVAL_MINUTES")
+    _shared.reset()
+    assert sync.sync_interval_seconds() == 6 * 3600
 
 
 def test_the_event_carries_the_synced_snapshot(acc: Connected) -> None:

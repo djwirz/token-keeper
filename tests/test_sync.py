@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterator
+from typing import Any
 
 import boto3
 import pytest
+from botocore.exceptions import ConnectTimeoutError, EndpointConnectionError, ReadTimeoutError
 from moto import mock_aws
 
 from token_keeper import sync
@@ -34,7 +37,9 @@ def test_values_in_bounds_are_used(monkeypatch: pytest.MonkeyPatch, raw: str, se
     assert sync.sync_interval_seconds() == seconds
 
 
-@pytest.mark.parametrize("raw", ["14", "0", "-15", "361", "abc", "15.5", "1e2"])
+@pytest.mark.parametrize(
+    "raw", ["14", "0", "-15", "361", "abc", "15.5", "1e2", "+15", "1_5", "\u0661\u0665"]
+)
 def test_a_bad_knob_falls_back_to_six_hours_and_says_so(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], raw: str
 ) -> None:
@@ -44,14 +49,33 @@ def test_a_bad_knob_falls_back_to_six_hours_and_says_so(
 
 
 def test_the_value_is_cached_for_a_minute_then_reread(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The same call the worker makes, with no clock passed in: only the module's own
+    # clock moves (PR 11 review: an injected clock left the real path untested).
     clock = [1000.0]
+    monkeypatch.setattr(sync, "_now", lambda: clock[0])
     monkeypatch.setenv("SYNC_INTERVAL_MINUTES", "15")
-    assert sync.sync_interval_seconds(lambda: clock[0]) == 900
+    assert sync.sync_interval_seconds() == 900
     monkeypatch.setenv("SYNC_INTERVAL_MINUTES", "360")
     clock[0] += sync.INTERVAL_CACHE_SECONDS - 1
-    assert sync.sync_interval_seconds(lambda: clock[0]) == 900
+    assert sync.sync_interval_seconds() == 900
     clock[0] += 1
-    assert sync.sync_interval_seconds(lambda: clock[0]) == SIX_HOURS
+    assert sync.sync_interval_seconds() == SIX_HOURS
+
+
+def test_the_cache_follows_wall_clock_time() -> None:
+    # Not time.monotonic: whether it advances while Lambda freezes a sandbox between
+    # invocations isn't documented.
+    assert sync._now is time.time
+
+
+def test_a_fallback_is_cached_too(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sync, "_now", lambda: 1000.0)
+    monkeypatch.setenv("SYNC_INTERVAL_MINUTES", "abc")
+    for _ in range(3):
+        assert sync.sync_interval_seconds() == SIX_HOURS
+    assert capsys.readouterr().out.count("sync.interval_invalid") == 1
 
 
 @pytest.fixture
@@ -68,6 +92,38 @@ def test_in_aws_the_parameter_is_read(aws: None, monkeypatch: pytest.MonkeyPatch
     boto3.client("ssm").put_parameter(Name=PARAM, Value="15", Type="String")
     monkeypatch.setenv("SYNC_INTERVAL_MINUTES_PARAM", PARAM)
     assert sync.sync_interval_seconds() == 900
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        EndpointConnectionError(endpoint_url="https://ssm.invalid"),
+        ConnectTimeoutError(endpoint_url="https://ssm.invalid"),
+        ReadTimeoutError(endpoint_url="https://ssm.invalid"),
+    ],
+)
+def test_a_network_failure_never_stops_syncs(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], error: Exception
+) -> None:
+    # What a hang or a network blip in AWS raises: BotoCoreErrors, not the ClientError
+    # moto gives for a missing parameter (PR 11 review).
+    def fail(name: str, config: object = None) -> str | None:
+        assert config is sync.INTERVAL_READ_CONFIG  # the fast client, not the defaults
+        raise error
+
+    monkeypatch.setattr(sync, "optional_env_or_ssm", fail)
+    assert sync.sync_interval_seconds() == SIX_HOURS
+    assert "sync.interval_unreadable" in capsys.readouterr().out
+
+
+def test_the_ssm_read_fails_fast() -> None:
+    # The worker has 40 seconds; botocore's defaults would wait a minute per attempt.
+    # Checked on a real client, since botocore rewrites the retries dict in place.
+    client = boto3.client("ssm", region_name="us-east-1", config=sync.INTERVAL_READ_CONFIG)
+    config: Any = client.meta.config  # botocore's stubs don't list these attributes
+    assert config.connect_timeout == config.read_timeout == 2
+    assert config.retries is not None
+    assert config.retries["total_max_attempts"] == 3  # the first try and two retries
 
 
 def test_an_unreadable_parameter_never_stops_syncs(

@@ -13,6 +13,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import boto3
+from botocore.config import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 from token_keeper import log
@@ -31,6 +32,9 @@ MIN_SYNC_INTERVAL_MINUTES = 15
 MAX_SYNC_INTERVAL_MINUTES = DEFAULT_SYNC_INTERVAL_SECONDS // 60
 # Re-read at most this often, so a change lands within a minute without a cold start.
 INTERVAL_CACHE_SECONDS = 60
+# The knob is read before the lease is taken, but a hung read would still eat the
+# worker's 40 seconds: fail fast and fall back to six hours instead (PR 11 review).
+INTERVAL_READ_CONFIG = Config(connect_timeout=2, read_timeout=2, retries={"max_attempts": 2})
 # Jitter is ±30 minutes, or a quarter of the interval when that's smaller, so a short
 # demo cadence isn't swamped by it.
 MAX_JITTER_SECONDS = 30 * 60
@@ -46,16 +50,21 @@ MAX_BACKOFF_SECONDS = 60 * 60
 
 
 _interval_cache: tuple[float, int] | None = None  # (when it was read, seconds)
+# Wall-clock time, not monotonic: whether Lambda's monotonic clock advances while the
+# sandbox is frozen isn't documented, and a 60-second cache doesn't care about clock
+# jumps. A module attribute, so tests can move it for the path the worker runs.
+_now: Callable[[], float] = time.time
 
 
 def jitter_seconds(interval: int) -> int:
     return min(MAX_JITTER_SECONDS, interval // 4)
 
 
-def sync_interval_seconds(clock: Callable[[], float] = time.monotonic) -> int:
-    """The current sync interval, re-read at most once a minute."""
+def sync_interval_seconds() -> int:
+    """The current sync interval, re-read at most once a minute. The fallback is cached
+    too, so a bad knob logs a warning at most once a minute per warm worker."""
     global _interval_cache
-    read_at = clock()
+    read_at = _now()
     if _interval_cache is not None and read_at - _interval_cache[0] < INTERVAL_CACHE_SECONDS:
         return _interval_cache[1]
     interval = _read_interval()
@@ -72,16 +81,15 @@ def _read_interval() -> int:
     """The knob's value in seconds. A missing, unreadable or bad knob never stops syncs:
     it means the normal six hours."""
     try:
-        raw = optional_env_or_ssm(SYNC_INTERVAL_SETTING)
+        raw = optional_env_or_ssm(SYNC_INTERVAL_SETTING, INTERVAL_READ_CONFIG)
     except (BotoCoreError, ClientError) as exc:
         log.get_logger().warning("sync.interval_unreadable", extra={"error": type(exc).__name__})
         return DEFAULT_SYNC_INTERVAL_SECONDS
     if raw is None:
         return DEFAULT_SYNC_INTERVAL_SECONDS
-    try:
-        minutes = int(raw.strip())
-    except ValueError:
-        minutes = 0
+    # Whole minutes in plain ASCII digits: int() alone would also take "+15" or "1_5".
+    digits = raw.strip()
+    minutes = int(digits) if digits.isascii() and digits.isdigit() else 0
     if not MIN_SYNC_INTERVAL_MINUTES <= minutes <= MAX_SYNC_INTERVAL_MINUTES:
         log.get_logger().warning("sync.interval_invalid", extra={"value": raw[:16]})
         return DEFAULT_SYNC_INTERVAL_SECONDS

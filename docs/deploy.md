@@ -144,18 +144,20 @@ The GIF shows acceptance criterion 1 (spec §11) on the deployed `demo`: connect
 
 **Before recording:**
 1. Set the cadence knob to 15 minutes (runbook, "Sync cadence knob"). This is a hand change to AWS, so ask first.
-2. Check the demo account has public GitHub activity from the last few weeks, so the card isn't empty (spec §5).
+2. **Wait a minute** before connecting. A warm worker can hold the old six-hour value for up to a minute, and a connect inside that minute schedules the next sync six hours out.
+3. Check the demo account has public GitHub activity from the last few weeks, so the card isn't empty (spec §5).
 
 **Shot list,** one take or several, cut together:
 1. **The status page,** with the card as it stands.
-2. **Connect:** unlock with the passcode, click Connect, approve on GitHub. Back on the page, the profile and recent activity appear. The reconnect also applies the 15-minute knob from here on.
-3. **A scheduled sync:** wait for it, then reload. Show "Last synced" moving on. Cut the wait: it can be anything from about 15 to 30 minutes.
-4. **Revoke:** GitHub → Settings → Applications → Authorized GitHub Apps → revoke the app. Back on the page, reload: the card says "needs re-auth" within seconds.
-5. **Reconnect:** Connect again, approve, and the card is back to active.
+2. **Connect:** unlock with the passcode, click "Connect GitHub", approve on GitHub. Back on the page, the card says "Connected", with the profile and recent activity. The reconnect also applies the 15-minute knob from here on. Before waiting, check the account's next due time is about 15 minutes out (runbook, "Sync cadence knob").
+3. **A scheduled sync:** wait for it, then reload. Show "Last synced" moving on. Cut the wait: it can be anything from about 10 to 35 minutes.
+4. **Revoke:** GitHub → Settings → Applications → Authorized GitHub Apps → revoke the app. Back on the page, reload: the card says "Needs re-auth (revoked)" within seconds.
+5. **Reconnect:** "Connect GitHub" again, approve, and the card says "Connected" again.
 
 **Recording rules:**
 - The browser window only, with no bookmarks bar, other tabs or extensions showing.
 - No email address, AWS console, account ID or passcode in frame. Type the passcode off-camera, or cut that part.
+- On GitHub's Authorized GitHub Apps page, which lists every app you've authorized, frame only the token-keeper row, or cut to just after the revoke.
 - Aim for under about 30 seconds and a few MB once it's a GIF.
 - Hand the raw recording over as a file. It's trimmed, scaled and checked frame by frame before it goes in `docs/media/`.
 

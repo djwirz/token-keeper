@@ -47,19 +47,20 @@ The body is `{"account_id": …}` for a sync, or `{"account_id", "type", "webhoo
 
 **How to recover.** Fix the cause first: a code fix ships through CI; a secret mismatch is fixed with `put_demo_secrets.py` (docs/deploy.md). Then do one of these:
 
-- **Redrive.** This moves every message back to the queue it came from. Deliveries are safe to redrive: the body is built from the account's state at send time, and the receiver ignores an equal or lower `version`. Syncs are safe too: the lease guards them, and an account that's no longer `active` is skipped.
+- **Redrive.** This moves every message in a DLQ back to its work queue (`DeliveryDlq` → `DeliveryQueue`, `SyncDlq` → `SyncQueue`). Deliveries are safe to redrive: the body is built from the account's state at send time, and the receiver ignores an equal or lower `version`. Syncs are safe too: the lease guards them, and an account that's no longer `active` is skipped.
   ```bash
-  DLQ_ARN=$(aws sqs get-queue-attributes --queue-url "$(res AWS::SQS::Queue DeliveryDlq)" --attribute-names QueueArn --query Attributes.QueueArn --output text)
-  aws sqs start-message-move-task --source-arn "$DLQ_ARN"
-  aws sqs list-message-move-tasks --source-arn "$DLQ_ARN" --query 'Results[0].[Status, ApproximateNumberOfMessagesMoved]'
+  arn() { aws sqs get-queue-attributes --queue-url "$(res AWS::SQS::Queue "$1")" --attribute-names QueueArn --query Attributes.QueueArn --output text; }
+  aws sqs start-message-move-task --source-arn "$(arn DeliveryDlq)" --destination-arn "$(arn DeliveryQueue)"
+  aws sqs list-message-move-tasks --source-arn "$(arn DeliveryDlq)" --query 'Results[0].[Status, ApproximateNumberOfMessagesMoved, FailureReason]'
   ```
+  Always name the destination. Without `--destination-arn`, SQS sends each message back to the queue it dead-lettered from, and a message that was put on the DLQ directly (by hand, or by a drill) has no such queue: the whole task fails with `CouldNotDetermineMessageSource` and moves nothing. A moved message gets a new `SentTimestamp`, so a redriven delivery's `DeliveryLatency` counts from the redrive, not from the original event.
 - **Delete a poison message.** Use this for a message that can never succeed, such as a body that isn't JSON. Look at the body first, then delete it with the receipt handle from that same receive:
   ```bash
   RECEIPT=$(aws sqs receive-message --queue-url "$(res AWS::SQS::Queue SyncDlq)" --visibility-timeout 60 --query 'Messages[0].ReceiptHandle' --output text)
   aws sqs delete-message --queue-url "$(res AWS::SQS::Queue SyncDlq)" --receipt-handle "$RECEIPT"
   ```
 
-The alarm goes back to OK, with an email, within about ten minutes of the DLQ emptying. Don't take that email as proof the DLQ is empty: SQS can stop reporting a queue nobody touches, and a quiet DLQ then reads as zero. Check with `get-queue-attributes` (above).
+The alarm goes back to OK, with an email, usually within a quarter of an hour of the DLQ emptying. Don't take that email as proof the DLQ is empty: SQS can stop reporting a queue nobody touches, and a quiet DLQ then reads as zero. Check with `get-queue-attributes` (above).
 
 ## Refresh failed
 
@@ -81,11 +82,11 @@ Each line carries `account_id`, `correlation_id` and `reason`. Then read the acc
 
 The account's item shows `state`, `state_reason` and `last_error_code`. It has no tokens left; those were deleted.
 
-**How to recover.** Nothing can bring the old grant back: GitHub documents no grace period. The user reconnects from the main app, and the callback takes the account over with a fresh pair. The alarm clears by itself an hour after the last rejection.
+**How to recover.** Nothing can bring the old grant back: GitHub documents no grace period. The user reconnects from the main app, and the callback takes the account over with a fresh pair. The alarm clears by itself a little over an hour after the last rejection, once its twelve five-minute periods have aged out.
 
 ## Planner missing
 
-**What it means.** The planner Lambda hasn't been invoked for 45 minutes. No account is being picked up for a scheduled sync. Connects still work, and so does the callback's immediate sync, so the receiver's "last synced" times stop moving.
+**What it means.** The planner Lambda hasn't been invoked for three whole fifteen-minute periods in a row, so the email comes about an hour after its last run. No account is being picked up for a scheduled sync. Connects still work, and so does the callback's immediate sync, so the receiver's "last synced" times stop moving.
 
 **How to check.**
 

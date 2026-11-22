@@ -93,7 +93,7 @@ The alarms live in `TokenKeeper`, which CI deploys. They notify the `token-keepe
    ```bash
    ALERT_EMAIL="$(sed -n 's/^ALERT_EMAIL=//p' .env.local)" npx cdk deploy Alerts
    ```
-3. **Confirm the subscription:** AWS Notifications emails a link; click **Confirm subscription**. Never click "unsubscribe" in an alarm email: it silently ends every notification. Check without printing the address (`email True` means confirmed):
+3. **Confirm the subscription:** AWS Notifications emails a link; click **Confirm subscription**. The budget's confirmation email looks the same, so check the email names `token-keeper-alarms`, and that the page you land on says the subscription is confirmed. Never click "unsubscribe" in an alarm email: it silently ends every notification. Check without printing the address (`email True` means confirmed):
    ```bash
    TOPIC=$(aws sns list-topics --query "Topics[?ends_with(TopicArn, ':token-keeper-alarms')].TopicArn" --output text)
    aws sns list-subscriptions-by-topic --topic-arn "$TOPIC" --query 'Subscriptions[].[Protocol, SubscriptionArn != `PendingConfirmation`]' --output text
@@ -103,6 +103,40 @@ The alarms live in `TokenKeeper`, which CI deploys. They notify the `token-keepe
    ```bash
    aws cloudwatch set-alarm-state --alarm-name token-keeper-refresh-failed --state-value ALARM --state-reason "email path check"
    ```
+
+## Forcing each alarm (proof, not routine)
+
+Spec §8 asks for each alarm to be fired once, live, with the email arriving. None of these changes a template property, so the stack stays in sync. Run them one at a time, so each email is easy to place. Shell helpers (`res`, `logs`) are at the top of [runbook.md](runbook.md). How long each took on 2026-11-21 is in [ADR 0019](adr/0019-observability-as-built.md), "Proven live".
+
+**DLQ (about a quarter of an hour to ALARM).** Both DLQs must be empty first (runbook, "DLQ messages"). A body that isn't JSON makes the worker raise; after three receives SQS moves it to `SyncDlq`:
+```bash
+aws sqs send-message --queue-url "$(res AWS::SQS::Queue SyncQueue)" --message-body 'alarm drill: not json'
+```
+Expect `logs Worker '"sync.error"'` three times, then the ALARM email. Recover with the runbook's "Delete a poison message": look at the body first. To prove the redrive as well, put a valid delivery message for a real account straight on `DeliveryDlq`, wait for the ALARM, then use the runbook's redrive, which names the destination (a hand-placed message has no source queue to go back to):
+```bash
+aws sqs send-message --queue-url "$(res AWS::SQS::Queue DeliveryDlq)" \
+  --message-body '{"account_id": "acc_…", "type": "account.updated", "webhook_id": "msg_…"}'
+```
+Expect `delivery.succeeded` in `logs Deliverer`, an empty DLQ, and the OK email. The receiver ignores the equal version.
+
+**RefreshFailed (a few minutes to ALARM, a little over an hour to OK).** A synthetic account with a fake refresh token and an expired access token; GitHub answers `bad_refresh_token`:
+```bash
+uv run python scripts/account_ops.py --profile token-keeper create-synthetic --send-sync
+```
+Expect `refresh.failed` with `reason` `token_error:bad_refresh_token`, the account `needs_reauth` (`refresh_rejected`), and the ALARM email. The demo receiver shows a `u_alarm_drill` card until it's deleted with the runbook's own procedure (the account id is positional):
+```bash
+uv run python scripts/account_ops.py --profile token-keeper delete --receiver acc_…
+```
+
+**PlannerMissing (about an hour to ALARM).** Save the schedule, then send it back with only `State` changed. `update-schedule` replaces the whole definition:
+```bash
+SCHEDULE=$(res AWS::Scheduler::Schedule PlannerSchedule)
+DIR=$(mktemp -d)
+aws scheduler get-schedule --name "$SCHEDULE" > "$DIR/schedule.json"
+jq 'del(.Arn, .CreationDate, .LastModificationDate) | .State = "DISABLED"' "$DIR/schedule.json" > "$DIR/disabled.json"
+aws scheduler update-schedule --cli-input-json "file://$DIR/disabled.json"
+```
+Re-enable it as soon as the ALARM email arrives, with the same jq and `"ENABLED"`. Then check `get-schedule` matches the saved copy apart from `LastModificationDate`, and run drift detection (runbook, "Planner missing"). While it's off, no account syncs on schedule; the first run after picks them all up.
 
 ## Forcing a refresh (proof, not routine)
 

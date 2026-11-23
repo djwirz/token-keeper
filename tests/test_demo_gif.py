@@ -139,7 +139,7 @@ def test_filter_trims_and_joins_each_kept_segment() -> None:
     text = gif.ffmpeg_filter(segments)
     assert "[0:v]trim=start=1.00:end=4.50,setpts=PTS-STARTPTS[c0]" in text
     assert "[1:v]trim=start=3.00:end=6.25,setpts=PTS-STARTPTS[c2]" in text
-    assert "[c0][c1][c2]concat=n=3:v=1:a=0,fps=10,scale=640:-1" in text
+    assert "[c0][c1][c2]concat=n=3:v=1:a=0,fps=10,scale=720:-1" in text
     assert text.endswith("paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle")
 
 

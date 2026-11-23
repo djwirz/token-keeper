@@ -69,8 +69,9 @@ PROFILE = STATE_HOME / "demo-gif-profile"
 VIDEOS = STATE_HOME / "demo-gif-videos"
 MANIFEST = VIDEOS / "manifest.json"
 OUT = ROOT / "docs" / "media" / "demo.gif"
-VIEWPORT = {"width": 720, "height": 800}
-GIF_WIDTH = 640
+# Wide enough for GitHub's desktop layout, so its Revoke button is on screen.
+VIEWPORT = {"width": 1024, "height": 800}
+GIF_WIDTH = 720
 FPS = 10
 LOCAL_RECEIVER = "http://localhost:8000/"
 LOCAL_CONTROL = "http://127.0.0.1:8002"
@@ -432,7 +433,7 @@ class Recorder:
         """Cut, let Dan do something in the browser, and carry on recording after."""
         was_keeping = self._start is not None
         self.cut()
-        input(f"\n>>> {what}, then press Enter here. ")
+        input(f"\n>>> {what}. Then press Enter in this terminal. ")
         if was_keeping:
             self.keep()
 
@@ -494,22 +495,49 @@ def follow_github(rec: Recorder, receiver_url: str, timeout: float = 120) -> Non
     raise CheckFailed(f"never got back from GitHub (stuck at {page.url.split('?')[0]})")
 
 
+HOLD_SUBMIT = """
+document.querySelector('form[action="/connect"]').addEventListener('submit', (e) => {
+  if (!window.__tkSubmit) e.preventDefault();
+});
+"""
+
+
 def connect(rec: Recorder, target: Target) -> None:
     page = rec.page
     page.goto(target.receiver_url)
+    # Enter in the passcode field would submit the form unrecorded and unchecked (it
+    # did, in the first rehearsal), so the form ignores every submit but the script's.
+    page.evaluate(HOLD_SUBMIT)
     page.locator("#passcode").click()
-    rec.by_hand("Type the demo passcode in the browser (don't press Connect)")
-    if not page.locator("#passcode").input_value():
-        raise CheckFailed("the passcode field is empty")
+    rec.by_hand("Type the demo passcode in the browser window (Enter there does nothing)")
+    if not page.url.startswith(target.receiver_url) or not page.locator("#passcode").input_value():
+        raise CheckFailed("the passcode field is empty, or the page moved on")
     with rec.clip():
         page.wait_for_timeout(800)
+        page.evaluate("window.__tkSubmit = true")
         page.get_by_role("button", name="Connect GitHub").click()
         follow_github(rec, target.receiver_url)
         page.get_by_text("GitHub account connected.").wait_for(timeout=15_000)
         # The card follows the account.connected event, which the deliverer sends a
         # moment after the redirect.
         until_card(page, "Connected", 30)
+        # The immediate sync's snapshot (with the activity list) follows a few seconds
+        # later; end the clip on it rather than on an empty card.
+        with_activity(page, 30)
         page.wait_for_timeout(2500)
+
+
+def with_activity(page: Any, seconds: float) -> None:
+    def shows() -> bool:
+        if page.locator(".card ul li").count():
+            return True
+        page.reload()
+        return bool(page.locator(".card ul li").count())
+
+    try:
+        wait_for(shows, seconds, 2, "the recent activity")
+    except CheckFailed:
+        print("  (no recent public activity on the card: the GIF will show an empty list)")
 
 
 def until_card(page: Any, state: str, seconds: float) -> None:
@@ -595,11 +623,16 @@ def record(target: Target, client_id: str, nudge: bool) -> Manifest:
     timings: dict[str, Any] = {}
     with sync_playwright() as p:
         context = launch(p, record=True)
+        blanks = list(context.pages)
         rec = Recorder(context)
         try:
             # 1. Connect.
             print("1. connect")
             rec.new_page()
+            # The persistent context opens a blank page of its own; closed only now,
+            # so the browser always has a page open.
+            for blank in blanks:
+                blank.close()
             before = target.facts()
             started = time.time()
             connect(rec, target)

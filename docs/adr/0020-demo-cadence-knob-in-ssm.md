@@ -33,3 +33,10 @@ Option 1:
 - **Cost while it's short.** More metrics are emitted every hour, past spec §8's free-tier reasoning. Kept to the recording session, the cost should be a few cents at most.
 - **Refresh is unchanged.** Refresh still happens only when the access token is near expiry, so a short cadence doesn't rotate tokens faster.
 - **One more SSM read per warm worker per minute.** Standard parameters at that rate cost nothing.
+
+## Proven live
+From the first, scripted recording attempt (2026-11-23), and its cleanup (2026-11-25). The GIF itself is still to be recorded by hand (`docs/deploy.md`); its timings will be added here.
+- **Drift, as predicted.** With the knob at 15, drift detection reported `DRIFTED`, and only `SyncIntervalParam` as `MODIFIED` on `/Value` (expected 360, actual 15). After putting it back to 360: `IN_SYNC`, before and after.
+- **The knob applies through a reconnect, and the planner picks it up.** The reconnect's immediate sync set the next due time about 15 minutes out. The planner's next run that found it due enqueued it 15 minutes after that sync (18:17:59 to 18:32:57 UTC); at six hours it would have waited about six hours.
+- **The minute's wait held.** The reconnect came about three minutes after the change, and the next due time was already 15 minutes out.
+- **Left short for longer than intended.** The knob stayed at 15 for about 45 hours after the scripted run was stopped. It cost close to nothing, because the only account stopped syncing on the first day (its tokens had been revoked, and the webhook that should have said so was switched off: see `docs/case-study.md`). The lesson for the runbook stays the same: put it back straight after recording.

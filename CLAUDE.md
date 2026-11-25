@@ -3,7 +3,7 @@
 A connector service that keeps third-party account connections healthy: it holds tokens, refreshes or re-verifies them on a schedule, and reports account state to a main app through one signed endpoint. First provider: GitHub. Use they/them for Dan.
 
 ## Status
-Building: slice 7 of 7 (demo polish), per `docs/spec.md` §12. Operator steps are in `docs/deploy.md`; alarm responses in `docs/runbook.md`.
+Slice 7 of 7 (demo polish) is done apart from the README GIF, which Dan records by hand: `docs/deploy.md`, "Recording the README GIF". When Dan says "let's get the screen grabs", follow that section from the top. After the GIF's small PR, v1 is done. Operator steps are in `docs/deploy.md`; alarm responses in `docs/runbook.md`.
 
 ## How we work
 - Pull requests only; never push to `main`. Merged PRs are the project's record.

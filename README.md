@@ -2,7 +2,7 @@
 
 Keeps third-party account connections alive: stores OAuth tokens, refreshes or re-verifies them on a schedule, and reports each account's state to a main app through one signed endpoint. First provider: GitHub.
 
-**Status:** building, slice 7 of 7 (demo polish). Design: [docs/spec.md](docs/spec.md) and [docs/adr/](docs/adr/). How it was built, and where AI got it wrong: [docs/case-study.md](docs/case-study.md).
+**Status:** v1 is built, deployed and proven live, apart from one step: the README GIF, which is still to be recorded by hand ([docs/deploy.md](docs/deploy.md), "Recording the README GIF"). Design: [docs/spec.md](docs/spec.md) and [docs/adr/](docs/adr/). How it was built, and where AI got it wrong: [docs/case-study.md](docs/case-study.md).
 
 <!-- The demo GIF (connect, a scheduled sync, revoke, reconnect) goes here in slice 7's live-proof PR. -->
 

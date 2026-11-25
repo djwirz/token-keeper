@@ -31,7 +31,8 @@ Each one is written down where it was decided, so the write-up can say "chosen, 
 - **Lost rotation.** If GitHub rotates the pair and the response is lost, the account needs re-auth. GitHub documents no grace period (spec §7).
 - **Not tested live: does a quiet DLQ stop reporting?** That needs a message left in a DLQ for six hours. It was deferred (ADR 0019, "Still open"; PR 9 review).
 - **The dashboard is checked through the API only.** The console needs a passkey, which the browser Claude drives can't complete (ADR 0019).
-- **The cadence knob drifts while it's set.** That's accepted for the recording session, under an hour ([ADR 0020](adr/0020-demo-cadence-knob-in-ssm.md)).
+- **The cadence knob drifts while it's set.** That's accepted for the recording session ([ADR 0020](adr/0020-demo-cadence-knob-in-ssm.md)). The first attempt left it short for about 45 hours (2026-11-23 to 25) after the scripted run was stopped; it cost close to nothing, because the only account had stopped syncing.
+- **Nothing notices when revocations stop arriving.** The GitHub App's webhook was found switched off on 2026-11-25 (cause unknown; it last delivered on 2026-11-20). A revoke then flips nothing: the account only reaches `needs_reauth` when its next sync's refresh is rejected, up to about six hours later. No alarm can tell "no revocations" from "no webhook". Found during slice 7, and turned back on.
 
 ## How AI was used
 Claude Code did most of the typing. Dan made every decision and did everything that needed their identity: GitHub sign-ins, app settings, AWS account setup, approvals, and revoking.
@@ -57,6 +58,7 @@ The most common mistake, and the reason mutation checks became routine. Only one
   - a synthesizer test that read the template, not the manifest the CLI reads (PR 5);
   - an alarm ARN in the form only the test app writes (PR 9).
 - **A "no wildcard IAM" assertion** that missed a wildcard inside an ARN (PR 2).
+- **The scripted GIF's "scheduled sync" check passed on a sync nobody scheduled (slice 7).** It only asked whether the snapshot had moved since the connect. On the live run, two connects 3 seconds apart each triggered an immediate sync, and the second one passed as "scheduled", 2 seconds after the connect instead of about 15 minutes. The planner had enqueued nothing. The direct proof was in the logs all along: the planner's enqueue, then the worker's sync, with no callback in between.
 
 ### Confident claims about other systems that were wrong
 - **"An OAuth App leaves nothing to keep alive."** That had been out of date since GitHub's August 2026 change. ADR 0002 now rests on permissions and the revocation webhook instead (PR 1).
@@ -88,6 +90,7 @@ The most common mistake, and the reason mutation checks became routine. Only one
 - A circuit breaker and a time-based `needs_reauth` for day-long GitHub outages (PR 1).
 - Deploy-first slicing; local-first turned out to suit a project whose proof is mostly Python logic (PR 1).
 - A status-only service that would show nothing; this led to snapshot sync, [ADR 0008](adr/0008-sync-snapshots-not-token-vending.md) (PR 1).
+- **A scripted README GIF (slice 7).** Modelled on another project's `demo:gif`: Playwright in a signed-in browser profile, checks against the page and DynamoDB after each clip, ffmpeg in Docker, and new local-runner endpoints to rehearse it. About 1,200 lines in all, for a GIF recorded once, with Dan at the keyboard throughout anyway (the passcode, GitHub sign-in, the knob, the frame check). Two rehearsals each needed fixes, the live run gave a false pass (above), and Dan called the workflow "about as poor as there is". It was dropped unmerged, for a hand recording plus one log query.
 
 ### Smaller ones worth one line each
 - The local runner printed OAuth `code` and `state` in its access log (PR 3).
@@ -98,6 +101,8 @@ The most common mistake, and the reason mutation checks became routine. Only one
 - The planner schedule stayed off for about ten hours in the PlannerMissing drill, not one, because the session paused before re-enabling it (PR 10).
 - `aws login` credentials needed `botocore[crt]`, and "it worked" wasn't checked against AWS until the parameters turned out to be missing (PR 5).
 - The wrong pronoun for Dan in the first spec draft (PR 1).
+- The GIF script waited for Enter in the terminal while Dan typed the passcode, without foreseeing that Enter in a password field submits the form, so the first rehearsal's connect went unrecorded and unchecked (slice 7).
+- After the scripted run was stopped, its cleanup assessment said the run had stopped before the revoke and blamed the double connect for the dead tokens. The script had in fact revoked on GitHub; Dan's "it's refreshing wildly" was the loop that only starts after the revoke (slice 7).
 
 ## Numbers to use carefully
 Keep them as words, as the repo does: "under four days", "about a dollar a month for the KMS key", "within seconds", "about an hour". The precise timings in the ADRs' "Proven live" sections come from single runs.

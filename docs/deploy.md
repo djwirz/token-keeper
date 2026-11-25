@@ -140,28 +140,46 @@ Re-enable it as soon as the ALARM email arrives, with the same jq and `"ENABLED"
 
 ## Recording the README GIF (slice 7)
 
-The GIF shows acceptance criterion 1 (spec §11) on the deployed `demo`: connect, a *scheduled* sync, revocation and reconnect. Dan records it with their own screen recorder, in their own browser, where they're already signed in to GitHub.
+**Not recorded yet.** The GIF shows acceptance criterion 1 (spec §11) on the deployed `demo`: connect, a *scheduled* sync, revocation and reconnect. Dan records it by hand with macOS's recorder (Cmd-Shift-5), in their own browser, where they're already signed in to GitHub. Claude sets the knob, watches the logs, and turns the clips into the GIF. A scripted Playwright version was tried and dropped (`docs/case-study.md`, "Design over-reach that Dan cut").
 
-**Before recording:**
-1. Set the cadence knob to 15 minutes (runbook, "Sync cadence knob"). This is a hand change to AWS, so ask first.
-2. **Wait a minute** before connecting. A warm worker can hold the old six-hour value for up to a minute, and a connect inside that minute schedules the next sync six hours out.
-3. Check the demo account has public GitHub activity from the last few weeks, so the card isn't empty (spec §5).
+Allow about an hour. Most of it is the wait for the scheduled sync, when nothing needs Dan.
 
-**Shot list,** one take or several, cut together:
-1. **The status page,** with the card as it stands.
-2. **Connect:** unlock with the passcode, click "Connect GitHub", approve on GitHub. Back on the page, the card says "Connected", with the profile and recent activity. The reconnect also applies the 15-minute knob from here on. Before waiting, check the account's next due time is about 15 minutes out (runbook, "Sync cadence knob").
-3. **A scheduled sync:** wait for it, then reload. Show "Last synced" moving on. Cut the wait: it can be anything from about 10 to 35 minutes.
-4. **Revoke:** GitHub → Settings → Applications → Authorized GitHub Apps → revoke the app. Back on the page, reload: the card says "Needs re-auth (revoked)" within seconds.
-5. **Reconnect:** "Connect GitHub" again, approve, and the card says "Connected" again.
+### Before recording
+1. `aws login --profile token-keeper`. If AWS's account chooser gives a 400 on the session that's already signed in, sign in fresh in a private window.
+2. **Check the starting point:** the knob reads `360`, drift is `IN_SYNC`, and the demo account is `active` (runbook, "Sync cadence knob").
+3. **Check the GitHub App's webhook is Active** (GitHub → Settings → Developer settings → GitHub Apps → the app → General → Webhook). On 2026-11-25 it was found switched off, and a revoke then flips nothing.
+4. **The receiver page and the passcode** (the deployed passcode, not the local one in `.env.local`):
+   ```bash
+   aws ssm get-parameter --name /token-keeper/demo/shared/receiver-url --query Parameter.Value --output text
+   aws ssm get-parameter --name /token-keeper/demo/receiver/demo-passcode --with-decryption --query Parameter.Value --output text | tr -d '\n' | pbcopy
+   ```
+   The second line puts the passcode on the clipboard without showing it. Copy something else afterwards.
+5. **The recorder:** Cmd-Shift-5, "Record Selected Portion", sized around the browser window. Nothing else in frame: no bookmarks bar, other tabs, notifications, email address, AWS console or account ID.
+6. **Set the knob to 15** (a hand change to AWS: ask first), then **wait a full minute** before connecting. A warm worker can hold the six-hour value for up to a minute.
 
-**Recording rules:**
-- The browser window only, with no bookmarks bar, other tabs or extensions showing.
-- No email address, AWS console, account ID or passcode in frame. Type the passcode off-camera, or cut that part.
-- On GitHub's Authorized GitHub Apps page, which lists every app you've authorized, frame only the token-keeper row, or cut to just after the revoke.
-- Aim for under about 30 seconds and a few MB once it's a GIF.
-- Hand the raw recording over as a file. It's trimmed, scaled and checked frame by frame before it goes in `docs/media/`.
+### The clips
+1. **Connect.** Paste the passcode with the recorder off. Start recording, click "Connect GitHub" **once** (approve on GitHub if asked), and stop when the card says "Connected" with your recent activity. Two clicks start two connects, each with its own immediate sync, which muddies the proof. Then Claude checks the account's next due time is about 15 minutes out.
+2. **A scheduled sync.** Claude watches the logs and says when it lands, about 10 to 35 minutes later. Record a reload showing "Last synced" moved on.
+3. **Revoke.** GitHub → Settings → Applications → **Authorized GitHub Apps** → the app → Revoke. That page lists every app you've authorized, so frame only this app's row, or cut to just after the revoke. Back on the receiver, reload: "Needs re-auth (revoked)" within seconds.
+4. **Reconnect.** "Connect GitHub" once, approve, and the card says "Connected" again. If GitHub's token endpoint fails (an error page after approving; the callback logs `token_http_500`), just connect again.
 
-**After recording:** set the knob back to 360 and check drift (runbook, "Sync cadence knob").
+### Proving the sync was scheduled
+The GIF can't show *why* "Last synced" moved, so the PR quotes the logs. Between clip 1's connect and clip 2 there must be a planner run that enqueued the account, then the worker's sync, and no callback in between. With the runbook's `logs` helper, over the last hour:
+
+```bash
+logs Planner '{ $.enqueued > 0 }'
+logs Callback '"callback.connected"'
+logs Worker '"sync.succeeded"'
+```
+
+Line up the timestamps: callback, its immediate sync, then about 15 minutes later a planner enqueue of 1 and a worker sync with the same correlation id as that planner run.
+
+### After recording
+1. **Put the knob back to 360** straight away (ask first), then check drift is `IN_SYNC` (runbook, "Sync cadence knob").
+2. **Hand over the `.mov` files** (Cmd-Shift-5 saves them to the Desktop).
+3. **Claude makes `docs/media/demo.gif`** with ffmpeg: trimmed, scaled to about 720 px wide, 10 frames a second, one palette. Aim for under about 30 seconds and a few MB. ffmpeg runs in Docker, from an image pinned by digest (ask before pulling it), or from Homebrew if Dan prefers.
+4. **Claude checks sampled frames by eye** for any email address, account ID, passcode or token, and runs gitleaks.
+5. **A small PR** adds the GIF to the README in place of the hidden placeholder, quotes the log lines, adds the timings to ADR 0020's "Proven live", and sets the status to "v1 done" in the README, `CLAUDE.md` and spec §12.
 
 ## Forcing a refresh (proof, not routine)
 

@@ -11,7 +11,7 @@ Slice 7 of 7 (demo polish) is done apart from the README GIF, which Dan records 
 - Every decision that would be expensive to reverse gets an ADR in `docs/adr/` (format: ADR 0001). Don't decide silently in code.
 - ADRs are written as `Accepted` in the PR that adds them; merging is the acceptance. Never rewrite a merged ADR's decision: add a new ADR that supersedes it.
 - When the spec and the code disagree, stop and ask; update the spec in the same PR if the decision changes.
-- Built with Claude Code in the open: the case study gets a section on how AI was used and where it was wrong, so note real mistakes in PR descriptions.
+- Built with Claude Code. The case study says so once, briefly, under "How it was built"; mistakes go under "What went wrong" without attributing them to the AI. Note real mistakes in PR descriptions.
 
 ## Constraints
 - Never employer code, data or names beyond what's public. Synthetic or own-account data only.

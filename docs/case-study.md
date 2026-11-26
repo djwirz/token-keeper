@@ -34,8 +34,8 @@ Each one is written down where it was decided, so the write-up can say "chosen, 
 - **The cadence knob drifts while it's set.** That's accepted for the recording session ([ADR 0020](adr/0020-demo-cadence-knob-in-ssm.md)). The first attempt left it short for about 45 hours (2026-11-23 to 25) after the scripted run was stopped; it cost close to nothing, because the only account had stopped syncing.
 - **Nothing notices when revocations stop arriving.** The GitHub App's webhook was found switched off on 2026-11-25 (cause unknown; it last delivered on 2026-11-20). A revoke then flips nothing: the account only reaches `needs_reauth` when its next sync's refresh is rejected, up to about six hours later. No alarm can tell "no revocations" from "no webhook". Found during slice 7, and turned back on.
 
-## How AI was used
-Claude Code did most of the typing. Dan made every decision and did everything that needed their identity: GitHub sign-ins, app settings, AWS account setup, approvals, and revoking.
+## How it was built
+AI-assisted with Claude Code. Dan owned the design, decisions and review, and did everything that needed their identity: GitHub sign-ins, app settings, AWS account setup, approvals, and revoking.
 
 The workflow that held up:
 - **Spec first, then one thin slice per PR,** each slice planned in plan mode and approved before any code.
@@ -43,9 +43,9 @@ The workflow that held up:
 - **A fresh-eyes review of every slice PR** by a separate Claude Code session that only reports. The main session applies the fixes. (Two sessions once fixed the same findings in parallel, PR 5, which is why the review only reports.)
 - **Mutation checks:** break the code on purpose and confirm a test fails. They became routine after PR 4, when one exposed a stale-read test with nothing stale in it. Most of the other weak tests below were caught by a real deploy, a real browser or a review.
 - **Live drills after each deploy.** Every hand change to AWS waits for Dan's "go". Since PR 8, every result is checked against AWS itself, drift included.
-- **Mistakes go in the PR description,** under "How AI was used".
+- **Mistakes go in the PR description.**
 
-## Where AI was wrong
+## What went wrong
 A selection from PRs 1–10 and the ADRs, grouped by pattern, because the patterns are the story. The PR descriptions have the full lists.
 
 ### Tests that claimed more than they checked
